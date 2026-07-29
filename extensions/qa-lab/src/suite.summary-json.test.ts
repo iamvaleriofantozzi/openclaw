@@ -61,11 +61,12 @@ describe("buildQaSuiteSummaryJson", () => {
   it("records declarative non-Crabline channel-driver metadata", () => {
     const json = buildQaSuiteSummaryJson({
       ...baseParams,
+      channel: "telegram",
       channelDriver: "live",
     });
 
     expect(json.run.channelDriver).toBe("live");
-    expect(json.run.channel).toBeNull();
+    expect(json.run.channel).toBe("telegram");
     expect(json.run.channelCapabilityMatrixPath).toBeNull();
     expect(json.run.channelDriverSmokePath).toBeNull();
   });

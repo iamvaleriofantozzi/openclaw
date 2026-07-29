@@ -145,7 +145,7 @@ export async function runQaRuntimeParitySuite(params: {
               outputDir: cellOutputDir,
               providerMode: params.providerMode,
               transportId: params.transportId,
-              channelDriver: params.channelDriver ?? undefined,
+              channelDriver: transportFactoryResult.driver,
               channelDriverSelection: params.channelDriverSelection,
               primaryModel: remapModelRefForForcedRuntime({
                 modelRef: params.primaryModel,
@@ -251,7 +251,7 @@ export async function runQaRuntimeParitySuite(params: {
         alternateModel: params.alternateModel,
         fastMode: params.fastMode,
         concurrency: params.concurrency,
-        channelDriver: params.channelDriver,
+        channelDriver: transportFactoryResult.driver,
         channelDriverSelection: params.channelDriverSelection,
         scenarioIds:
           params.scenarioIds && params.scenarioIds.length > 0

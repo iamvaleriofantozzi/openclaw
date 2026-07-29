@@ -500,10 +500,13 @@ describe("qa suite runtime launcher", () => {
     );
     const summary = JSON.parse(await fs.readFile(result.result.summaryPath, "utf8")) as {
       counts: { failed: number; passed: number; total: number };
+      run?: { channel?: unknown; channelDriver?: unknown };
     };
     expect(summary.counts).toMatchObject({ total: 2, passed: 1, failed: 1 });
+    expect(summary.run).toMatchObject({ channel: null, channelDriver: null });
     const evidence = JSON.parse(await fs.readFile(result.result.evidencePath, "utf8")) as {
       entries: Array<{
+        execution: { channel: Record<string, unknown> };
         test: { id: string };
         result: { status: string; failure?: { reason: string } };
       }>;
@@ -522,6 +525,10 @@ describe("qa suite runtime launcher", () => {
         }),
       ]),
     );
+    expect(
+      evidence.entries.find((entry) => entry.test.id === "whatsapp-status-command")?.execution
+        .channel,
+    ).toEqual({ id: "whatsapp", live: false });
     await expect(fs.access(result.result.reportPath)).resolves.toBeUndefined();
   });
 
@@ -2203,7 +2210,7 @@ describe("qa suite runtime launcher", () => {
     ]);
     const evidence = JSON.parse(await fs.readFile(result.result.evidencePath, "utf8")) as {
       entries?: Array<{
-        execution?: { channel?: { id?: string } };
+        execution?: { channel?: Record<string, unknown> };
         result?: { status?: string };
         test?: { id?: string };
       }>;
@@ -2211,9 +2218,9 @@ describe("qa suite runtime launcher", () => {
     for (const scenarioId of ["whatsapp-status-command", "whatsapp-access-control-dm-open"]) {
       const blocked = evidence.entries?.find((entry) => entry.test?.id === scenarioId);
       expect(blocked).toMatchObject({
-        execution: { channel: { id: "whatsapp", driver: "live", live: true } },
         result: { status: "blocked" },
       });
+      expect(blocked?.execution?.channel).toEqual({ id: "whatsapp", live: false });
     }
   });
 

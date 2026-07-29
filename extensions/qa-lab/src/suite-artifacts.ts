@@ -35,6 +35,7 @@ export type QaSuiteSummaryJsonParams = {
   alternateModel: string;
   fastMode: boolean;
   concurrency: number;
+  channel?: string | null;
   channelDriver?: QaScorecardChannelDriver | null;
   channelDriverSelection?: QaSuiteChannelDriverSelection | null;
   scenarioIds?: readonly string[];
@@ -95,7 +96,7 @@ export function buildQaSuiteSummaryJson(params: QaSuiteSummaryJsonParams): QaSui
       fastMode: params.fastMode,
       concurrency: params.concurrency,
       channelDriver: params.channelDriver ?? params.channelDriverSelection?.channelDriver ?? null,
-      channel: params.channelDriverSelection?.channel ?? null,
+      channel: params.channel ?? params.channelDriverSelection?.channel ?? null,
       channelCapabilityMatrixPath: params.channelDriverSelection?.capabilityMatrixPath ?? null,
       channelDriverSmokePath: params.channelDriverSelection?.smokeArtifactPath ?? null,
       scenarioIds:
@@ -269,6 +270,7 @@ export async function writeQaSuiteArtifacts(params: {
     `${JSON.stringify(
       buildQaSuiteSummaryJson({
         ...params,
+        channel: effectiveChannelDriverSelection?.channel ?? params.transport.id,
         channelDriverSelection: effectiveChannelDriverSelection,
       }),
       null,

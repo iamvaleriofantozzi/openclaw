@@ -116,20 +116,21 @@ describe("qa suite", () => {
     expect(startLab).not.toHaveBeenCalled();
   });
 
-  it("keeps metadata-only live channel drivers on the shared QA transport", async () => {
-    const create = vi.fn();
-
+  it("rejects conflicting channel driver setup", async () => {
     await expect(
       qaSuiteProgressTesting.createQaSuiteTransportAdapter({
-        adapterFactories: [{ id: "telegram", matches: () => true, create }],
         channelDriver: "live",
+        channelDriverSelection: {
+          capabilityMatrixPath: "crabline-fake-provider-capabilities.json",
+          channel: "telegram",
+          channelDriver: "crabline",
+          smokeArtifactPath: "crabline-fake-provider-smoke.json",
+        },
         outputDir: "/tmp/qa-output",
         state: {} as QaLabServerHandle["state"],
         transportId: "qa-channel",
       }),
-    ).resolves.toMatchObject({ adapter: { id: "qa-channel" } });
-
-    expect(create).not.toHaveBeenCalled();
+    ).rejects.toThrow("channelDriver=live conflicts with adapter setup driver=crabline");
   });
 
   it("records live transport preparation as the first shared flow step", async () => {
@@ -177,17 +178,25 @@ describe("qa suite", () => {
     const adapter = { id: "telegram" } as QaTransportAdapter;
     const create = vi.fn(async () => adapter);
 
+    const liveResult = await qaSuiteProgressTesting.createQaSuiteTransportAdapter({
+      adapterFactories: [{ id: "telegram", matches: () => true, create }],
+      channelDriver: "live",
+      channelId: "telegram",
+      outputDir: "/tmp/qa-output",
+      transportPolicy: { requireGroupMention: true },
+      state: {} as QaLabServerHandle["state"],
+      transportId: "qa-channel",
+    });
+
+    expect(liveResult).toMatchObject({ adapter, driver: "live" });
     await expect(
       qaSuiteProgressTesting.createQaSuiteTransportAdapter({
-        adapterFactories: [{ id: "telegram", matches: () => true, create }],
         channelDriver: "live",
-        channelId: "telegram",
         outputDir: "/tmp/qa-output",
-        transportPolicy: { requireGroupMention: true },
         state: {} as QaLabServerHandle["state"],
         transportId: "qa-channel",
       }),
-    ).resolves.toMatchObject({ adapter });
+    ).resolves.toMatchObject({ adapter: { id: "qa-channel" }, driver: "qa-channel" });
 
     expect(create).toHaveBeenCalledTimes(1);
     expect(create).toHaveBeenCalledWith(
@@ -514,19 +523,27 @@ describe("qa suite", () => {
         alternateModel: "mock-openai/gpt-5.6-luna-alt",
         fastMode: true,
         concurrency: 1,
+        channelDriver: "qa-channel",
       });
 
       expect(artifacts.evidencePath).toBe(path.join(outputDir, QA_EVIDENCE_FILENAME));
       const evidence = JSON.parse(await fs.readFile(artifacts.evidencePath, "utf8")) as {
         kind?: string;
-        entries?: unknown[];
+        entries?: Array<{ execution?: { channel?: unknown } }>;
       };
       expect(evidence.kind).toBe(QA_EVIDENCE_SUMMARY_KIND);
       expect(evidence.entries).toHaveLength(1);
+      expect(evidence.entries?.[0]?.execution?.channel).toEqual({
+        id: "qa-channel",
+        driver: "qa-channel",
+        live: false,
+      });
       const summary = JSON.parse(await fs.readFile(artifacts.summaryPath, "utf8")) as {
         evidence?: unknown;
+        run?: { channel?: unknown; channelDriver?: unknown };
       };
       expect(summary.evidence).toBeUndefined();
+      expect(summary.run).toMatchObject({ channel: "qa-channel", channelDriver: "qa-channel" });
     } finally {
       await fs.rm(outputDir, { recursive: true, force: true });
     }
