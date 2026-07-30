@@ -1,3 +1,4 @@
+import { createAgentExecutionAttribution } from "../../agents/agent-execution-attribution.js";
 import { resolveBootstrapWarningSignaturesSeen } from "../../agents/bootstrap-budget.js";
 import type { BootstrapContextRunKind } from "../../agents/bootstrap-mode.js";
 import type { RunCliAgentParams } from "../../agents/cli-runner/types.js";
@@ -13,6 +14,11 @@ import {
 } from "../../agents/run-termination.js";
 import { withLocalSessionPlacementTurnAdmission } from "../../agents/session-placement-admission.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
+import {
+  claimAgentRunContext,
+  getAgentEventLifecycleGeneration,
+  getAgentRunContext,
+} from "../../infra/agent-events.js";
 import {
   getGeneratedMediaTaskIdsForSessionKey,
   hasNewGeneratedMediaTaskForSessionKey,
@@ -58,7 +64,8 @@ export async function runCliFallbackCandidate(params: {
   candidateThinkLevel?: ThinkLevel;
   candidateFastMode: Pick<RunCliAgentParams, "fastMode" | "fastModeAutoOnSeconds">;
   runId: string;
-  lifecycleGeneration: string;
+  getLifecycleGeneration: () => string;
+  onLifecycleGeneration: (generation: string) => void;
   runAbortSignal?: AbortSignal;
   runLane: RunCliAgentParams["lane"];
   isFinalFallbackAttempt?: boolean;
@@ -92,7 +99,7 @@ export async function runCliFallbackCandidate(params: {
     runId: params.runId,
     sessionKey: turn.sessionKey,
     startedAt: cliLifecycleStartedAt,
-    getLifecycleGeneration: () => params.lifecycleGeneration,
+    getLifecycleGeneration: params.getLifecycleGeneration,
     resolveTerminationFields: (error) => ({
       ...resolveAgentRunErrorLifecycleFields(error, params.runAbortSignal),
       ...(isReplyOperationRestartAbort(turn.replyOperation)
@@ -169,9 +176,36 @@ export async function runCliFallbackCandidate(params: {
         // Admission may wait behind another turn that starts detached media.
         // Snapshot only after this turn owns the session placement.
         const mediaTaskIdsBefore = getGeneratedMediaTaskIdsForSessionKey(turn.sessionKey);
+        const lifecycleGeneration = getAgentEventLifecycleGeneration();
+        const attribution =
+          turn.attribution?.lifecycleGeneration === lifecycleGeneration
+            ? turn.attribution
+            : turn.attribution
+              ? createAgentExecutionAttribution({
+                  ...turn.attribution,
+                  lifecycleGeneration,
+                  sessionKey: turn.sessionKey,
+                  sessionId: turn.followupRun.run.sessionId,
+                  agentId: turn.followupRun.run.agentId,
+                })
+              : undefined;
+        if (lifecycleGeneration !== params.getLifecycleGeneration()) {
+          params.onLifecycleGeneration(lifecycleGeneration);
+        }
+        if (attribution !== turn.attribution) {
+          turn.attribution = attribution;
+        }
+        claimAgentRunContext(params.runId, {
+          ...getAgentRunContext(params.runId),
+          ...(attribution ? { attribution } : {}),
+          sessionKey: turn.sessionKey,
+          sessionId: turn.followupRun.run.sessionId,
+          agentId: turn.followupRun.run.agentId,
+          lifecycleGeneration,
+        });
         return runCliAgentWithLifecycle({
           runId: params.runId,
-          lifecycleGeneration: params.lifecycleGeneration,
+          lifecycleGeneration,
           provider: params.cliExecutionProvider,
           startedAt: cliLifecycleStartedAt,
           emitLifecycleTerminal: false,
@@ -320,6 +354,7 @@ export async function runCliFallbackCandidate(params: {
                   })
               : undefined,
           runParams: {
+            ...(attribution ? { attribution } : {}),
             sessionId: turn.followupRun.run.sessionId,
             sessionKey: turn.sessionKey,
             runtimePolicySessionKey:
@@ -358,6 +393,7 @@ export async function runCliFallbackCandidate(params: {
             timeoutMs: turn.followupRun.run.timeoutMs,
             runTimeoutOverrideMs: turn.followupRun.run.runTimeoutOverrideMs,
             runId: params.runId,
+            lifecycleGeneration,
             lane: params.runLane,
             extraSystemPrompt: turn.followupRun.run.extraSystemPrompt,
             sourceReplyDeliveryMode: turn.followupRun.run.sourceReplyDeliveryMode,

@@ -7,6 +7,7 @@ import {
 import { hasOutboundReplyContent } from "openclaw/plugin-sdk/reply-payload";
 import type { ChatRunStartupPhase } from "../../../packages/gateway-protocol/src/index.js";
 import { peekSessionMcpRuntime } from "../../agents/agent-bundle-mcp-manager-api.js";
+import { createAgentExecutionAttribution } from "../../agents/agent-execution-attribution.js";
 import { resolveBootstrapWarningSignaturesSeen } from "../../agents/bootstrap-budget.js";
 import {
   formatRateLimitOrOverloadedErrorCopy,
@@ -150,9 +151,11 @@ async function executeAgentTurnInternalWithRetryState(
       params.sessionCtx.Surface ??
       params.sessionCtx.Provider,
   );
-  let lifecycleGeneration = captureAgentRunLifecycleGeneration(runId);
+  let lifecycleGeneration =
+    params.attribution?.lifecycleGeneration ?? captureAgentRunLifecycleGeneration(runId);
   if (params.sessionKey) {
     registerAgentRunContext(runId, {
+      ...(params.attribution ? { attribution: params.attribution } : {}),
       sessionKey: params.sessionKey,
       ...(params.followupRun.run.sessionId ? { sessionId: params.followupRun.run.sessionId } : {}),
       agentId: params.followupRun.run.agentId,
@@ -495,8 +498,22 @@ async function executeAgentTurnInternal(
 /** Runs the agent turn with provider/model fallback, retry, and closed settlement. */
 export async function executeAgentTurn(params: AgentTurnParams): Promise<AgentTurnExecutionResult> {
   const runId = params.opts?.runId ?? crypto.randomUUID();
-  const executionParams =
+  const baseExecutionParams =
     params.opts?.runId === runId ? params : { ...params, opts: { ...params.opts, runId } };
+  const lifecycleGeneration = captureAgentRunLifecycleGeneration(runId);
+  const attribution =
+    baseExecutionParams.attribution ??
+    createAgentExecutionAttribution({
+      runId,
+      lifecycleGeneration,
+      sessionKey: baseExecutionParams.sessionKey,
+      sessionId: baseExecutionParams.followupRun.run.sessionId,
+      agentId: baseExecutionParams.followupRun.run.agentId,
+    });
+  const executionParams =
+    baseExecutionParams.attribution === attribution
+      ? baseExecutionParams
+      : { ...baseExecutionParams, attribution };
   // Gateway writes require exact view identity against this bare session runtime;
   // requester-scoped and combined runtimes cannot cross the App view boundary.
   const runtime = executionParams.isHeartbeat
@@ -529,7 +546,6 @@ export async function executeAgentTurn(params: AgentTurnParams): Promise<AgentTu
     terminalOutcomeCommitted = true;
     executionParams.replyOperation?.freezeAbort();
   };
-  const lifecycleGeneration = captureAgentRunLifecycleGeneration(runId);
   try {
     const internal = await withAgentRunLifecycleGeneration(lifecycleGeneration, async () => {
       try {
