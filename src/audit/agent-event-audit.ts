@@ -80,6 +80,15 @@ function legacyAuditSourceId(params: {
   return `${params.runId}:${params.sourceSequence}:${params.occurredAt}:${params.action}`;
 }
 
+function auditSourceId(
+  params: Parameters<typeof legacyAuditSourceId>[0] & { lifecycleGeneration?: string },
+): string {
+  const legacySourceId = legacyAuditSourceId(params);
+  return params.lifecycleGeneration
+    ? `lifecycle:${params.lifecycleGeneration}:${legacySourceId}`
+    : legacySourceId;
+}
+
 function buildRunInstance(runId: string, lifecycleGeneration?: string): string {
   return `${lifecycleGeneration ?? "unknown"}\0${runId}`;
 }
@@ -155,8 +164,11 @@ function resolveProvenance(
   return runProvenance.get(runInstance) ?? deriveProvenance(event);
 }
 
-function resolveToolProvenance(runId: string, event: TrustedToolExecutionEvent) {
-  const lifecycleGeneration = getTrustedToolExecutionLifecycleGeneration(event);
+function resolveToolProvenance(
+  runId: string,
+  event: TrustedToolExecutionEvent,
+  lifecycleGeneration?: string,
+) {
   const runInstance = lifecycleGeneration
     ? buildRunInstance(runId, lifecycleGeneration)
     : (activeRunInstanceByRunId.get(runId) ?? buildRunInstance(runId));
@@ -215,11 +227,12 @@ function projectAgentEvent(event: AgentEventPayload): AgentAuditProjection | und
     const action = "agent.run.started" as const;
     return {
       input: {
-        sourceId: legacyAuditSourceId({
+        sourceId: auditSourceId({
           runId,
           sourceSequence: event.seq,
           occurredAt,
           action,
+          lifecycleGeneration: event.lifecycleGeneration,
         }),
         sourceSequence: event.seq,
         occurredAt,
@@ -243,11 +256,12 @@ function projectAgentEvent(event: AgentEventPayload): AgentAuditProjection | und
     const action = "agent.run.finished" as const;
     return {
       input: {
-        sourceId: legacyAuditSourceId({
+        sourceId: auditSourceId({
           runId,
           sourceSequence: event.seq,
           occurredAt,
           action,
+          lifecycleGeneration: event.lifecycleGeneration,
         }),
         sourceSequence: event.seq,
         occurredAt,
@@ -286,7 +300,8 @@ function projectToolExecutionEventToAudit(
     return undefined;
   }
   const toolCallId = auditToolCallId(event.toolCallId);
-  const provenance = resolveToolProvenance(runId, event);
+  const lifecycleGeneration = getTrustedToolExecutionLifecycleGeneration(event);
+  const provenance = resolveToolProvenance(runId, event, lifecycleGeneration);
   const occurredAt = asDateTimestampMs(event.sourceTimestampMs) ?? event.ts;
   const attribution = {
     sourceSequence: event.seq,
@@ -304,11 +319,12 @@ function projectToolExecutionEventToAudit(
   if (event.type === "tool.execution.started") {
     const action = "tool.action.started" as const;
     return {
-      sourceId: legacyAuditSourceId({
+      sourceId: auditSourceId({
         runId,
         sourceSequence: event.seq,
         occurredAt,
         action,
+        lifecycleGeneration,
       }),
       ...attribution,
       action,
@@ -350,11 +366,12 @@ function projectToolExecutionEventToAudit(
               : { status: "failed" as const, errorCode: "tool_failed" as const };
   const action = "tool.action.finished" as const;
   return {
-    sourceId: legacyAuditSourceId({
+    sourceId: auditSourceId({
       runId,
       sourceSequence: event.seq,
       occurredAt,
       action,
+      lifecycleGeneration,
     }),
     ...attribution,
     action,
