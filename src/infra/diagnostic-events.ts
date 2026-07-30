@@ -11,6 +11,7 @@ import {
   type DiagnosticTraceContext,
 } from "./diagnostic-trace-context.js";
 import { isBlockedObjectKey } from "./prototype-keys.js";
+import { captureTrustedToolExecutionLifecycleGeneration } from "./trusted-tool-execution-context.js";
 
 export type DiagnosticSessionState = "idle" | "processing" | "waiting";
 
@@ -902,7 +903,6 @@ export type TrustedToolExecutionEvent = Extract<
 >;
 
 type TrustedToolExecutionEventListener = (event: TrustedToolExecutionEvent) => void;
-const trustedToolExecutionLifecycleGeneration = new WeakMap<TrustedToolExecutionEvent, string>();
 
 type QueuedDiagnosticEvent = {
   event: DiagnosticEventPayload;
@@ -1328,7 +1328,7 @@ function dispatchTrustedToolExecutionEvent(
     return;
   }
   if (typeof event.runId === "string" && event.runId.length > 0) {
-    trustedToolExecutionLifecycleGeneration.set(
+    captureTrustedToolExecutionLifecycleGeneration(
       enriched,
       captureAgentRunLifecycleGeneration(event.runId),
     );
@@ -1342,13 +1342,6 @@ function dispatchTrustedToolExecutionEvent(
       );
     }
   }
-}
-
-/** Returns private run ownership captured when a trusted tool event was emitted. */
-export function getTrustedToolExecutionLifecycleGeneration(
-  event: TrustedToolExecutionEvent,
-): string | undefined {
-  return trustedToolExecutionLifecycleGeneration.get(event);
 }
 
 /** Emits an untrusted diagnostic event from external/plugin-facing code. */
