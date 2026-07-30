@@ -384,6 +384,7 @@ export function buildNodeSystemRunInvoke(params: {
     // the node program timer. Without this the Gateway falls back to a fixed 30s
     // pending-invoke timer and discards a later node result as `ignored`.
     timeoutMs: params.target.invokeDeadlineMs,
+    sessionKey: params.sessionKey,
     params: {
       command: params.command,
       rawCommand: params.rawCommand,
@@ -466,6 +467,7 @@ export async function prepareNodeSystemRun(params: {
     {
       nodeId: params.target.nodeId,
       command: "system.run.prepare",
+      sessionKey: params.request.sessionKey,
       params: {
         command: params.target.argv,
         rawCommand: params.request.command,
