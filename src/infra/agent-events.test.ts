@@ -28,6 +28,7 @@ import {
   retainQueuedAgentRunContext,
   sweepStaleRunContexts,
 } from "./agent-run-registry.js";
+import { onAgentRunContextRetired } from "./agent-run-context-retirement.js";
 import { emitAgentRunStatusEvent } from "./agent-run-status-events.js";
 import { recordAgentRunOutputTokens } from "./agent-run-usage.js";
 
@@ -1228,6 +1229,33 @@ describe("agent-events sequencing", () => {
     expect(first.registry.sweepStaleRunContexts(500)).toBe(1);
     first.events.resetAgentEventsForTest();
     clock.mockRestore();
+  });
+
+  test("notifies internal projections when run contexts retire", () => {
+    const retired: Array<{
+      runId: string;
+      lifecycleGeneration: string;
+      reason: string;
+    }> = [];
+    const unsubscribe = onAgentRunContextRetired((event) => retired.push(event));
+    const firstGeneration = getAgentEventLifecycleGeneration();
+    registerAgentRunContext("run-replaced", {
+      sessionKey: "session-first",
+      lifecycleGeneration: firstGeneration,
+    });
+
+    const secondGeneration = rotateAgentEventLifecycleGeneration();
+    claimAgentRunContext("run-replaced", {
+      sessionKey: "session-second",
+      lifecycleGeneration: secondGeneration,
+    });
+    clearAgentRunContext("run-replaced", secondGeneration);
+
+    expect(retired).toEqual([
+      { runId: "run-replaced", lifecycleGeneration: firstGeneration, reason: "replaced" },
+      { runId: "run-replaced", lifecycleGeneration: secondGeneration, reason: "cleared" },
+    ]);
+    unsubscribe();
   });
 });
 

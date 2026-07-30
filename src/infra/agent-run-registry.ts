@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import type { AgentExecutionAttribution } from "../agents/agent-execution-attribution.js";
 import type { VerboseLevel } from "../auto-reply/thinking.js";
 import { resolveGlobalSingleton } from "../shared/global-singleton.js";
+import { retireAgentRunContext } from "./agent-run-context-retirement.js";
 import { clearAgentRunUsage, resetAgentRunUsageForTest } from "./agent-run-usage.js";
 
 /** Per-run metadata used to stamp events and gate Control UI visibility. */
@@ -270,6 +271,9 @@ export function claimAgentRunContext(
     }
     return claimId;
   }
+  if (existing) {
+    retireAgentRunContext(runId, existing.lifecycleGeneration, "replaced");
+  }
   state.contexts.set(runId, createAgentRunContext(context, lifecycleGeneration));
   state.sequenceResetHandler?.(runId);
   clearAgentRunUsage(runId);
@@ -475,6 +479,7 @@ export function clearAgentRunContext(
   state.sequenceResetHandler?.(runId);
   clearAgentRunUsage(runId, lifecycleGeneration ?? existing?.lifecycleGeneration);
   if (removed) {
+    retireAgentRunContext(runId, existing?.lifecycleGeneration, "cleared");
     bumpAgentRunIndexVersion();
   }
 }
@@ -529,6 +534,7 @@ export function sweepStaleRunContexts(maxAgeMs = 30 * 60 * 1000): number {
       state.sequenceResetHandler?.(runId);
       clearAgentRunUsage(runId, context.lifecycleGeneration);
       state.owners.delete(runId);
+      retireAgentRunContext(runId, context.lifecycleGeneration, "swept");
       swept += 1;
     }
   }
@@ -542,6 +548,9 @@ export function resetAgentRunRegistryForTest(): void {
   const state = getAgentRunRegistryState();
   const hadRunContexts = state.contexts.size > 0;
   resetAgentRunUsageForTest();
+  for (const [runId, context] of state.contexts) {
+    retireAgentRunContext(runId, context.lifecycleGeneration, "reset");
+  }
   state.contexts.clear();
   state.owners.clear();
   state.queuedRunContextLeases = undefined;
