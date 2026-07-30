@@ -14,6 +14,7 @@ import {
 } from "../infra/diagnostic-trace-context.js";
 import { pruneMapToMaxSize } from "../infra/map-size.js";
 import { copyPluginToolMeta, getPluginToolMeta } from "../plugins/tools.js";
+import { resolveToolExecutionCorrelation } from "./agent-tools.before-tool-call.attribution.js";
 import {
   buildToolContentPrivateData,
   emitSkillUsedDiagnostic,
@@ -275,6 +276,7 @@ export function wrapToolWithBeforeToolCallHook(
     ...(options.approvalMode ? { approvalMode: options.approvalMode } : {}),
     emitDiagnostics: options.emitDiagnostics !== false,
   };
+  const correlation = resolveToolExecutionCorrelation(ctx);
   const toolContentPolicy = resolveDiagnosticModelContentCapturePolicy(ctx?.config);
   const wrappedTool: AnyAgentTool = {
     ...tool,
@@ -287,10 +289,10 @@ export function wrapToolWithBeforeToolCallHook(
           ? freezeDiagnosticTraceContext(createChildDiagnosticTraceContext(ctx.trace))
           : undefined;
       const buildEventBase = (toolParams: unknown) => ({
-        ...(ctx?.runId && { runId: ctx.runId }),
-        ...(ctx?.sessionKey && { sessionKey: ctx.sessionKey }),
-        ...(ctx?.sessionId && { sessionId: ctx.sessionId }),
-        ...(ctx?.agentId && { agentId: ctx.agentId }),
+        ...(correlation.runId && { runId: correlation.runId }),
+        ...(correlation.sessionKey && { sessionKey: correlation.sessionKey }),
+        ...(correlation.sessionId && { sessionId: correlation.sessionId }),
+        ...(correlation.agentId && { agentId: correlation.agentId }),
         ...(trace && { trace }),
         toolName: normalizedToolName,
         ...diagnosticIdentity,
@@ -303,7 +305,7 @@ export function wrapToolWithBeforeToolCallHook(
         toolParams: unknown,
         errorCategory?: string,
       ) => {
-        recordPreExecutionBlockedToolCall(toolCallId, ctx?.runId);
+        recordPreExecutionBlockedToolCall(toolCallId, correlation.runId);
         if (!hookOptions.emitDiagnostics) {
           return;
         }
@@ -320,7 +322,7 @@ export function wrapToolWithBeforeToolCallHook(
         errorCategory: string,
         deniedReason?: HookBlockedReason,
       ) => {
-        recordPreExecutionBlockedToolCall(toolCallId, ctx?.runId);
+        recordPreExecutionBlockedToolCall(toolCallId, correlation.runId);
         if (!hookOptions.emitDiagnostics) {
           return;
         }
@@ -369,7 +371,7 @@ export function wrapToolWithBeforeToolCallHook(
           reason: blockedCall.reason,
           deniedReason: blockedCall.deniedReason,
           toolCallId,
-          runId: ctx?.runId,
+          runId: correlation.runId,
         });
         await recordLoopOutcome({
           ctx,
@@ -465,9 +467,9 @@ export function wrapToolWithBeforeToolCallHook(
         recordPreExecutionError(error, outcome.params ?? hookParams, "tool_preparation");
         throw tagBeforeToolCallFailure(error, signal);
       }
-      recordAdjustedParamsForToolCall(toolCallId, executeParams, ctx?.runId);
+      recordAdjustedParamsForToolCall(toolCallId, executeParams, correlation.runId);
       const eventBase = buildEventBase(executeParams);
-      recordToolExecutionStarted(toolCallId, ctx?.runId);
+      recordToolExecutionStarted(toolCallId, correlation.runId);
       if (hookOptions.emitDiagnostics) {
         emitTrustedDiagnosticEvent({
           type: "tool.execution.started",
@@ -570,7 +572,7 @@ export function wrapToolWithBeforeToolCallHook(
     onUpdate,
     ...executionArgs: unknown[]
   ) => {
-    recordToolExecutionTracked(toolCallId, ctx?.runId);
+    recordToolExecutionTracked(toolCallId, correlation.runId);
     try {
       return await (executeWithHooks as ForwardedToolExecution)(
         toolCallId,
@@ -583,7 +585,7 @@ export function wrapToolWithBeforeToolCallHook(
       // Timeout observers may consume this while the call is still pending. The
       // wrapper owns final cleanup; every pre-body settle records the separate
       // blocked fact, so direct callers cannot retain settled ids.
-      clearTrackedToolExecution(toolCallId, ctx?.runId);
+      clearTrackedToolExecution(toolCallId, correlation.runId);
     }
   };
   copyPluginToolMeta(tool, wrappedTool);
