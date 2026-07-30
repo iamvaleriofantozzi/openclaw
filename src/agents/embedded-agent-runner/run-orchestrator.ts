@@ -309,7 +309,10 @@ async function runEmbeddedAgentInternal(
             sessionId: params.sessionId,
             tracker: startupStages,
           });
-          params.onExecutionStarted?.({ lifecycleGeneration });
+          params.onExecutionStarted?.({
+            lifecycleGeneration,
+            ...(params.attribution ? { attribution: params.attribution } : {}),
+          });
           notifyExecutionPhase("runner_entered");
           const canonicalWorkspace = resolveUserPath(
             resolveAgentWorkspaceDir(preparedModelRuntime.config, preparedAgentId),
