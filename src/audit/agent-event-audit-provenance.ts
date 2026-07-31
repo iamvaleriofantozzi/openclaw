@@ -2,7 +2,7 @@ import type { TrustedToolExecutionEvent } from "../infra/diagnostic-events.js";
 import { getAgentRunContext } from "../infra/agent-run-registry.js";
 import { parseAgentSessionKey } from "../routing/session-key.js";
 
-export type RunProvenance = {
+type RunProvenance = {
   actorType: "agent" | "system";
   agentId: string;
   sessionKey?: string;
