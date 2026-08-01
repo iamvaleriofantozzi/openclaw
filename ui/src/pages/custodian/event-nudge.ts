@@ -11,6 +11,27 @@ export type CustodianEventNudge = {
 
 export type CustodianSendDelivery = "unsent" | "sent" | "received";
 export type CustodianSendOutcome = "sent" | "rejected" | "unknown";
+export type CustodianSendResult = {
+  outcome: CustodianSendOutcome;
+  delivery: CustodianSendDelivery;
+};
+
+function isDefinitiveChatAdmissionRejection(error: GatewayRequestError): boolean {
+  // These admission shapes prove the handler never ran. Other sent UNAVAILABLE replies stay
+  // uncertain so the UI does not offer a duplicate acknowledgement after a partial failure.
+  if (error.code !== "UNAVAILABLE" || !error.retryable) {
+    return false;
+  }
+  const details = asRecord(error.details);
+  if (details?.method !== "openclaw.chat") {
+    return false;
+  }
+  return (
+    details.reason === "startup-sidecars" ||
+    details.reason === "gateway-suspending" ||
+    details.reason === "gateway-restarting"
+  );
+}
 
 export function classifyCustodianSendFailure(
   error: unknown,
@@ -19,7 +40,13 @@ export function classifyCustodianSendFailure(
   if (delivery === "received") {
     return "sent";
   }
-  if (error instanceof GatewayRequestError || delivery === "unsent") {
+  if (
+    delivery === "unsent" ||
+    (error instanceof GatewayRequestError &&
+      (error.code === "INVALID_REQUEST" ||
+        error.code === "FORBIDDEN" ||
+        isDefinitiveChatAdmissionRejection(error)))
+  ) {
     return "rejected";
   }
   return "unknown";

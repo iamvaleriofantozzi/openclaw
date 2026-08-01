@@ -168,6 +168,7 @@ class CustodianSurface extends OpenClawLightDomElement {
               boundaryAfterId: store.earlierBoundaryAfterId,
               assistantAvatar,
               showQuestion,
+              showQrCode: showQuestion && !store.answeredQuestions.has(questionKey),
               questionDisabled:
                 store.sending || !store.chatAvailable || store.answeredQuestions.has(questionKey),
               onSelect: (label) => store.answerQuestion(message, label),

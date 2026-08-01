@@ -6,11 +6,36 @@ import {
   validateSystemAgentSetupVerifyParams,
 } from "../index.js";
 import {
+  type SystemAgentChatQuestion,
+  type SystemAgentChatPresentation,
+  type SystemAgentChatResult,
+  SystemAgentChatParamsSchema,
+  SystemAgentChatResultSchema,
   SystemAgentChatQuestionSchema,
   SystemAgentChatHistoryResultSchema,
   SystemAgentSetupDetectResultSchema,
   SystemAgentSetupVerifyResultSchema,
 } from "./openclaw.js";
+
+const QR_DATA_URL =
+  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+const QR_DATA_URL_PREFIX = "data:image/png;base64,";
+
+function qrDataUrlWithLength(length: number): string {
+  return `${QR_DATA_URL_PREFIX}${"A".repeat(length - QR_DATA_URL_PREFIX.length)}`;
+}
+
+describe("OpenClaw chat params protocol", () => {
+  it("keeps presentation capabilities out of the request shape", () => {
+    expect(Value.Check(SystemAgentChatParamsSchema, { sessionId: "setup-session" })).toBe(true);
+    expect(
+      Value.Check(SystemAgentChatParamsSchema, {
+        sessionId: "setup-session",
+        capabilities: { qrCodePng: true },
+      }),
+    ).toBe(false);
+  });
+});
 
 describe("OpenClaw chat params protocol", () => {
   const base = { sessionId: "session-1", message: "What about this page?" };
@@ -55,6 +80,243 @@ describe("OpenClaw chat question protocol", () => {
     expect(Value.Check(SystemAgentChatQuestionSchema, { ...question, skipAction: "dismiss" })).toBe(
       false,
     );
+  });
+
+  it("accepts a single non-skippable acknowledgement action", () => {
+    const acknowledgement = {
+      ...question,
+      options: [{ label: "Continue" }],
+    };
+    expect(Value.Check(SystemAgentChatQuestionSchema, acknowledgement)).toBe(false);
+    expect(
+      Value.Check(SystemAgentChatQuestionSchema, { ...acknowledgement, allowSkip: true }),
+    ).toBe(false);
+    expect(
+      Value.Check(SystemAgentChatQuestionSchema, { ...acknowledgement, allowSkip: false }),
+    ).toBe(true);
+    expect(
+      Value.Check(SystemAgentChatQuestionSchema, {
+        ...acknowledgement,
+        allowSkip: false,
+        isOther: true,
+      }),
+    ).toBe(false);
+    expect(
+      Value.Check(SystemAgentChatQuestionSchema, {
+        ...acknowledgement,
+        allowSkip: false,
+        skipAction: "exit",
+      }),
+    ).toBe(false);
+  });
+
+  it("preserves source-compatible optional-field reads on acknowledgements", () => {
+    const readLegacyFields = (value: SystemAgentChatQuestion) => [value.isOther, value.skipAction];
+    const acknowledgement: SystemAgentChatQuestion = {
+      ...question,
+      options: [{ label: "Continue" }],
+      allowSkip: false,
+    };
+
+    expect(readLegacyFields(acknowledgement)).toEqual([undefined, undefined]);
+  });
+});
+
+describe("OpenClaw chat result protocol", () => {
+  const question = {
+    id: "setup-qr",
+    header: "Scan QR code",
+    question: "Scan the code, then continue.",
+    options: [{ label: "Continue" }],
+    allowSkip: false,
+  } satisfies SystemAgentChatPresentation["question"];
+
+  it("accepts the shared bounded PNG data URL contract", () => {
+    expect(
+      Value.Check(SystemAgentChatResultSchema, {
+        sessionId: "setup-session",
+        reply: "Scan this QR code, then continue.",
+        action: "none",
+        presentation: {
+          kind: "qr",
+          wizardInputPending: true,
+          dataUrl: QR_DATA_URL,
+          expiresAtMs: 1_800_000,
+          question,
+        },
+      }),
+    ).toBe(true);
+    expect(
+      Value.Check(SystemAgentChatResultSchema, {
+        sessionId: "setup-session",
+        reply: "Scan this QR code, then continue.",
+        action: "none",
+        presentation: {
+          kind: "qr",
+          wizardInputPending: true,
+          dataUrl: "not-a-data-url",
+          expiresAtMs: 1_800_000,
+          question,
+        },
+      }),
+    ).toBe(false);
+    const result = {
+      sessionId: "setup-session",
+      reply: "Scan this QR code, then continue.",
+      action: "none",
+      presentation: {
+        kind: "qr",
+        wizardInputPending: true,
+        dataUrl: qrDataUrlWithLength(16_384),
+        expiresAtMs: Number.MAX_SAFE_INTEGER,
+        question,
+      },
+    };
+    expect(Value.Check(SystemAgentChatResultSchema, result)).toBe(true);
+    expect(
+      Value.Check(SystemAgentChatResultSchema, {
+        ...result,
+        presentation: {
+          ...result.presentation,
+          dataUrl: qrDataUrlWithLength(16_385),
+        },
+      }),
+    ).toBe(false);
+    expect(
+      Value.Check(SystemAgentChatResultSchema, {
+        ...result,
+        presentation: {
+          ...result.presentation,
+          expiresAtMs: Number.MAX_SAFE_INTEGER + 1,
+        },
+      }),
+    ).toBe(false);
+  });
+
+  it("rejects partial or skippable QR presentation bundles", () => {
+    const base = {
+      sessionId: "setup-session",
+      reply: "Scan this QR code, then continue.",
+      action: "none",
+    };
+    expect(
+      Value.Check(SystemAgentChatResultSchema, {
+        ...base,
+        presentation: { kind: "qr", dataUrl: QR_DATA_URL },
+      }),
+    ).toBe(false);
+    expect(
+      Value.Check(SystemAgentChatResultSchema, {
+        ...base,
+        presentation: {
+          kind: "qr",
+          wizardInputPending: false,
+          dataUrl: QR_DATA_URL,
+          expiresAtMs: 1_800_000,
+          question,
+        },
+      }),
+    ).toBe(false);
+    expect(
+      Value.Check(SystemAgentChatResultSchema, {
+        ...base,
+        presentation: {
+          kind: "qr",
+          wizardInputPending: true,
+          dataUrl: QR_DATA_URL,
+          expiresAtMs: 1_800_000,
+          question: {
+            ...question,
+            options: [{ label: "Continue" }, { label: "Cancel" }],
+            allowSkip: true,
+          },
+        },
+      }),
+    ).toBe(false);
+    expect(
+      Value.Check(SystemAgentChatResultSchema, {
+        ...base,
+        wizardInputPending: true,
+        presentation: {
+          kind: "qr",
+          wizardInputPending: true,
+          dataUrl: QR_DATA_URL,
+          expiresAtMs: 1_800_000,
+          question,
+        },
+      }),
+    ).toBe(false);
+    expect(
+      Value.Check(SystemAgentChatResultSchema, {
+        ...base,
+        question,
+        presentation: {
+          kind: "qr",
+          wizardInputPending: true,
+          dataUrl: QR_DATA_URL,
+          expiresAtMs: 1_800_000,
+          question,
+        },
+      }),
+    ).toBe(false);
+    expect(
+      Value.Check(SystemAgentChatResultSchema, {
+        ...base,
+        action: "open-agent",
+        presentation: {
+          kind: "qr",
+          wizardInputPending: true,
+          dataUrl: QR_DATA_URL,
+          expiresAtMs: 1_800_000,
+          question,
+        },
+      }),
+    ).toBe(false);
+    expect(Value.Check(SystemAgentChatResultSchema, base)).toBe(true);
+  });
+
+  it("models the atomic QR bundle in the public TypeScript type", () => {
+    const accept = (_value: SystemAgentChatResult): void => {};
+    accept({
+      sessionId: "setup-session",
+      reply: "Scan this QR code, then continue.",
+      action: "none",
+      presentation: {
+        kind: "qr",
+        wizardInputPending: true,
+        dataUrl: QR_DATA_URL,
+        expiresAtMs: 1_800_000,
+        question,
+      },
+    });
+    const navigationPresentation = {
+      sessionId: "setup-session",
+      reply: "Scan it.",
+      action: "open-agent",
+      presentation: {
+        kind: "qr",
+        wizardInputPending: true,
+        dataUrl: QR_DATA_URL,
+        expiresAtMs: 1_800_000,
+        question,
+      },
+    };
+    // @ts-expect-error QR presentation cannot accompany a navigation action.
+    accept(navigationPresentation);
+    const multiOptionPresentation = {
+      sessionId: "setup-session",
+      reply: "Scan it.",
+      action: "none",
+      presentation: {
+        kind: "qr",
+        wizardInputPending: true,
+        dataUrl: QR_DATA_URL,
+        expiresAtMs: 1_800_000,
+        question: { ...question, options: [{ label: "Continue" }, { label: "Cancel" }] },
+      },
+    };
+    // @ts-expect-error QR acknowledgement is exactly one option.
+    accept(multiOptionPresentation);
   });
 });
 

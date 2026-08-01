@@ -1,7 +1,19 @@
 // Wizard session tests cover session creation and state transitions.
 
 import { describe, expect, test, vi } from "vitest";
+import { QR_PNG_DATA_URL_MAX_LENGTH } from "../../packages/gateway-protocol/src/schema/qr.js";
 import { WizardSession, wizardStepAwaitsInput, type WizardStep } from "./session.js";
+
+const QR_TEXT = "https://example.test/pair";
+const QR_DATA_URL =
+  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+const qrImageMocks = vi.hoisted(() => ({
+  renderQrPngDataUrlWithinLimit: vi.fn(async () => QR_DATA_URL),
+}));
+
+vi.mock("../media/qr-image.js", () => ({
+  renderQrPngDataUrlWithinLimit: qrImageMocks.renderQrPngDataUrlWithinLimit,
+}));
 
 function noteRunner() {
   return new WizardSession(async (prompter) => {
@@ -123,6 +135,95 @@ describe("WizardSession", () => {
     });
   });
 
+  test("renders caller-supplied text as a QR image only for capable hosts", async () => {
+    let acknowledged: boolean | undefined;
+    const expiresAtMs = Date.now() + 60_000;
+    const supported = new WizardSession(
+      async (prompter) => {
+        acknowledged = await prompter.qrCode?.({
+          title: "Link a device",
+          message: "Scan this QR code, then continue.",
+          text: QR_TEXT,
+          expiresAtMs,
+        });
+      },
+      { supportsQrCode: true },
+    );
+
+    const prompt = await supported.next();
+    expect(prompt.step).toMatchObject({
+      type: "select",
+      title: "Link a device",
+      message: "Scan this QR code, then continue.",
+      options: [{ value: true, label: "Continue" }],
+      initialValue: true,
+      qrDataUrl: QR_DATA_URL,
+      qrExpiresAtMs: expiresAtMs,
+      executor: "client",
+    });
+    expect(qrImageMocks.renderQrPngDataUrlWithinLimit).toHaveBeenCalledWith(
+      QR_TEXT,
+      QR_PNG_DATA_URL_MAX_LENGTH,
+    );
+    if (!prompt.step) {
+      throw new Error("expected QR acknowledgement step");
+    }
+    await supported.answer(prompt.step.id, true);
+    expect(prompt.step.qrDataUrl).toBeUndefined();
+    expect((await supported.next()).status).toBe("done");
+    expect(acknowledged).toBe(true);
+
+    let unsupportedHasQr = true;
+    const unsupported = new WizardSession(async (prompter) => {
+      unsupportedHasQr = typeof prompter.qrCode === "function";
+    });
+    expect((await unsupported.next()).status).toBe("done");
+    expect(unsupportedHasQr).toBe(false);
+  });
+
+  test("rejects an invalid owner-supplied QR expiry", async () => {
+    const session = new WizardSession(
+      async (prompter) => {
+        await prompter.qrCode?.({
+          title: "Link a device",
+          message: "Scan this QR code, then continue.",
+          text: QR_TEXT,
+          expiresAtMs: Number.POSITIVE_INFINITY,
+        });
+      },
+      { supportsQrCode: true },
+    );
+
+    await expect(session.next()).resolves.toMatchObject({
+      done: true,
+      status: "error",
+      error: expect.stringContaining("expiresAtMs must be a non-negative safe integer"),
+    });
+  });
+
+  test("reports QR rendering failures before presenting a wizard step", async () => {
+    qrImageMocks.renderQrPngDataUrlWithinLimit.mockRejectedValueOnce(
+      new Error("QR rendering failed"),
+    );
+    const session = new WizardSession(
+      async (prompter) => {
+        await prompter.qrCode?.({
+          title: "Link a device",
+          message: "Scan this QR code, then continue.",
+          text: QR_TEXT,
+        });
+      },
+      { supportsQrCode: true },
+    );
+
+    const result = await session.next();
+    expect(result).toMatchObject({
+      done: true,
+      status: "error",
+      error: expect.stringContaining("QR rendering failed"),
+    });
+  });
+
   test("invalid answers throw", async () => {
     const session = noteRunner();
     const first = await session.next();
@@ -190,6 +291,31 @@ describe("WizardSession", () => {
     expect(done.done).toBe(true);
     expect(done.status).toBe("cancelled");
     expect(session.signal.aborted).toBe(true);
+  });
+
+  test("cancel scrubs QR bytes from an already delivered step", async () => {
+    const session = new WizardSession(
+      async (prompter) => {
+        await prompter.qrCode?.({
+          title: "Link a device",
+          message: "Scan this QR code, then continue.",
+          text: QR_TEXT,
+        });
+      },
+      { supportsQrCode: true },
+    );
+
+    const prompt = await session.next();
+    if (!prompt.step) {
+      throw new Error("expected QR acknowledgement step");
+    }
+    const deliveredStep = prompt.step;
+    expect(deliveredStep.qrDataUrl).toBe(QR_DATA_URL);
+
+    expect(session.cancel()).toBe(true);
+
+    expect(deliveredStep.qrDataUrl).toBeUndefined();
+    expect((await session.next()).status).toBe("cancelled");
   });
 
   test("refuses cancellation after the durable commit point", async () => {

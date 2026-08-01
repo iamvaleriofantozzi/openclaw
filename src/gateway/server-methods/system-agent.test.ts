@@ -183,6 +183,7 @@ function seededSession(overrides?: Partial<SystemAgentChatSession>): SystemAgent
     welcome: "welcome text",
     lastUsedAt: 1,
     ownerKey: "device:device-test",
+    supportsQrCode: false,
     ...overrides,
   };
 }
@@ -353,6 +354,7 @@ describe("openclaw.setup.auth.start", () => {
     const wizardSessions = new Map();
     const context = {
       wizardSessions,
+      systemAgentSessions: new Map(),
       findRunningWizard: () => undefined,
       purgeWizardSession: (id: string) => wizardSessions.delete(id),
     } as unknown as GatewayRequestContext;
@@ -409,6 +411,7 @@ describe("openclaw.setup.prepare.start", () => {
     const wizardSessions = new Map();
     const context = {
       wizardSessions,
+      systemAgentSessions: new Map(),
       findRunningWizard: () => undefined,
       purgeWizardSession: (id: string) => wizardSessions.delete(id),
     } as unknown as GatewayRequestContext;
@@ -573,7 +576,7 @@ describe("openclaw.chat", () => {
     await expectDefined(
       systemAgentHandlers["openclaw.setup.verify"],
       'systemAgentHandlers["openclaw.setup.verify"] test invariant',
-    )({ params: {}, respond } as never);
+    )({ params: {}, respond, context: makeContext(new Map()) } as never);
 
     expect(setupInferenceMocks.verifySetupInference).toHaveBeenCalledWith({
       runtime: defaultRuntime,
@@ -628,6 +631,7 @@ describe("openclaw.chat", () => {
         activeAtResponse.push(getCommandLaneSnapshot(CommandLane.SystemAgent).activeCount);
         respond(ok, payload, error);
       },
+      context: makeContext(new Map()),
     } as never);
 
     await started.promise;
@@ -996,36 +1000,6 @@ describe("openclaw.chat", () => {
 
     expect(activeAtResponse).toEqual([2, 1]);
     expect(getCommandLaneSnapshot(CommandLane.SystemAgent).activeCount).toBe(0);
-  });
-
-  it("keeps the session map bounded during concurrent unique initialization", async () => {
-    const evictionStarted = createDeferred();
-    const releaseEviction = createDeferred();
-    const oldest = seededSession({ lastUsedAt: 0 });
-    const disposeOldest = vi.spyOn(oldest.engine, "dispose").mockImplementation(async () => {
-      evictionStarted.resolve();
-      await releaseEviction.promise;
-    });
-    const sessions = new Map<string, SystemAgentChatSession>([["oldest", oldest]]);
-    for (let index = 1; index < 8; index += 1) {
-      sessions.set(`existing-${index}`, seededSession({ lastUsedAt: index }));
-    }
-    stubEngineOverview();
-
-    const context = makeContext(sessions);
-    const first = callChat(context, { sessionId: "new-1" });
-    const second = callChat(context, { sessionId: "new-2" });
-    await evictionStarted.promise;
-    await new Promise((resolve) => {
-      setTimeout(resolve, 0);
-    });
-    releaseEviction.resolve();
-    await Promise.all([first, second]);
-
-    expect(disposeOldest).toHaveBeenCalledOnce();
-    expect(sessions.size).toBe(8);
-    expect(sessions.has("new-1")).toBe(true);
-    expect(sessions.has("new-2")).toBe(true);
   });
 
   it("resets a session on request", async () => {

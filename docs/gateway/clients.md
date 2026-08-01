@@ -97,8 +97,8 @@ const caps = [GATEWAY_CLIENT_CAPS.TOOL_EVENTS];
 
 The current registry contains `approvals`, `exec-approvals`, `inline-widgets`,
 `run-tool-bindings`, `session-scoped-events`, `plugin-approvals`,
-`task-suggestions`, `terminal-offset-seq`, `tool-events`, and `ui-commands`.
-Advertise only capabilities the client actually implements.
+`system-agent-qr-code`, `task-suggestions`, `terminal-offset-seq`, `tool-events`,
+and `ui-commands`. Advertise only capabilities the client actually implements.
 
 <Warning>
 `tool-events` gates live tool-execution streaming. The Gateway registers only
@@ -133,6 +133,46 @@ depend on the entrypoint and the resolved model. The gateway can return a typed
 rejection, while text-only model runs can omit additional images after their
 offload cap and still complete the request. The values are a connection-time
 snapshot, so re-read them on every reconnect.
+
+### Present system-agent QR codes
+
+Advertise `GATEWAY_CLIENT_CAPS.SYSTEM_AGENT_QR_CODE` only when the client can
+render a QR image and return a deliberate acknowledgement. A pending
+`openclaw.chat` response can then include one atomic `presentation` object:
+
+```json
+{
+  "presentation": {
+    "kind": "qr",
+    "dataUrl": "data:image/png;base64,...",
+    "expiresAtMs": 1800000000000,
+    "wizardInputPending": true,
+    "question": {
+      "id": "setup-qr",
+      "header": "Scan QR code",
+      "question": "Scan the code, then continue.",
+      "options": [{ "label": "Continue" }],
+      "allowSkip": false
+    }
+  }
+}
+```
+
+`dataUrl` is no longer than 16,384 characters. `expiresAtMs` is the absolute
+Unix-millisecond deadline supplied by the QR credential owner, capped by the
+hosted-wizard abandonment timeout. Send the option label or its explicit
+`reply` as the next chat message.
+
+Keep the QR visible only while that question remains unresolved and before
+`presentation.expiresAtMs`. At the deadline, remove both the image and acknowledgement
+action. Discard the image bytes after a confirmed or delivery-uncertain
+acknowledgement. Clients that do not advertise the capability retain the
+prose/choice fallback and never receive `presentation`.
+
+The negotiated QR capability is part of an in-memory system-agent session.
+Reconnects may reuse the session only while that capability is unchanged. If
+the capability changes, call `openclaw.chat` with `reset: true` before
+continuing.
 
 ## Recover state after reconnect
 

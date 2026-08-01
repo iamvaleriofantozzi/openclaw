@@ -93,6 +93,13 @@ const waitForActiveCronJobs = vi.fn(async (_timeoutMs?: number) => ({
 }));
 const reloadTaskRuntimeStateFromStore = vi.fn();
 const rotateAgentEventLifecycleGeneration = vi.fn();
+let fakeGatewayProcessInstanceId = "gateway-process-0";
+let fakeGatewayProcessInstanceSequence = 0;
+const rotateGatewayProcessInstanceId = vi.fn(() => {
+  fakeGatewayProcessInstanceSequence += 1;
+  fakeGatewayProcessInstanceId = `gateway-process-${fakeGatewayProcessInstanceSequence}`;
+  return fakeGatewayProcessInstanceId;
+});
 const clearRuntimeConfigSnapshot = vi.fn();
 const restartGatewayProcessWithFreshPid = vi.fn<
   (_opts?: { env?: NodeJS.ProcessEnv }) => {
@@ -222,6 +229,10 @@ vi.mock("../../infra/agent-events.js", () => ({
   isAgentEventLifecycleGenerationCurrent: (generation: string) => generation === "test-generation",
   registerAgentEventLifecycleRotationHandler: vi.fn(),
   rotateAgentEventLifecycleGeneration: () => rotateAgentEventLifecycleGeneration(),
+}));
+
+vi.mock("../../gateway/process-instance.js", () => ({
+  rotateGatewayProcessInstanceId: () => rotateGatewayProcessInstanceId(),
 }));
 
 vi.mock("../../config/runtime-snapshot.js", () => ({
@@ -1026,6 +1037,8 @@ describe("runGatewayLoop", () => {
 
   it("restarts after SIGUSR1 even when drain times out, and resets runtime state for the new iteration", async () => {
     vi.clearAllMocks();
+    fakeGatewayProcessInstanceId = "gateway-process-0";
+    fakeGatewayProcessInstanceSequence = 0;
     peekGatewaySigusr1RestartReason.mockReturnValue(undefined);
     respawnGatewayProcessForUpdate.mockReturnValue({
       mode: "disabled",
@@ -1049,6 +1062,7 @@ describe("runGatewayLoop", () => {
       const closeSecond = createCloseMock();
       const closeThird = createCloseMock();
       const { runtime, exited } = createRuntimeWithExitSignal();
+      const startedProcessInstanceIds: string[] = [];
 
       const start = vi.fn<StartServer>();
       let resolveFirst: (() => void) | null = null;
@@ -1056,6 +1070,7 @@ describe("runGatewayLoop", () => {
         resolveFirst = resolve;
       });
       start.mockImplementationOnce(async () => {
+        startedProcessInstanceIds.push(fakeGatewayProcessInstanceId);
         resolveFirst?.();
         return { close: closeFirst };
       });
@@ -1065,6 +1080,7 @@ describe("runGatewayLoop", () => {
         resolveSecond = resolve;
       });
       start.mockImplementationOnce(async () => {
+        startedProcessInstanceIds.push(fakeGatewayProcessInstanceId);
         resolveSecond?.();
         return { close: closeSecond };
       });
@@ -1074,6 +1090,7 @@ describe("runGatewayLoop", () => {
         resolveThird = resolve;
       });
       start.mockImplementationOnce(async () => {
+        startedProcessInstanceIds.push(fakeGatewayProcessInstanceId);
         resolveThird?.();
         return { close: closeThird };
       });
@@ -1137,6 +1154,7 @@ describe("runGatewayLoop", () => {
       ).toBeLessThan(resetAllLanes.mock.invocationCallOrder[0] ?? 0);
       expect(resetGatewayRestartStateForInProcessRestart).toHaveBeenCalledTimes(1);
       expect(rotateAgentEventLifecycleGeneration).toHaveBeenCalledTimes(1);
+      expect(rotateGatewayProcessInstanceId).toHaveBeenCalledTimes(1);
       expect(reloadTaskRuntimeStateFromStore).toHaveBeenCalledTimes(1);
       expect(reloadTaskRuntimeStateFromStore.mock.invocationCallOrder[0] ?? Infinity).toBeLessThan(
         start.mock.invocationCallOrder[1] ?? Infinity,
@@ -1177,6 +1195,12 @@ describe("runGatewayLoop", () => {
       expect(resetGatewaySuspendCoordinatorForLifecycleRestart).toHaveBeenCalledTimes(2);
       expect(resetGatewayRestartStateForInProcessRestart).toHaveBeenCalledTimes(2);
       expect(rotateAgentEventLifecycleGeneration).toHaveBeenCalledTimes(2);
+      expect(rotateGatewayProcessInstanceId).toHaveBeenCalledTimes(2);
+      expect(startedProcessInstanceIds).toEqual([
+        "gateway-process-0",
+        "gateway-process-1",
+        "gateway-process-2",
+      ]);
       expect(reloadTaskRuntimeStateFromStore).toHaveBeenCalledTimes(2);
       expect(acquireGatewayLock).toHaveBeenCalledTimes(3);
 

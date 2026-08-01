@@ -223,6 +223,66 @@ describe("createGatewayCloseHandler", () => {
     expect(deps.chatRunState.clear).toHaveBeenCalledTimes(1);
   });
 
+  it("continues shutdown when disposing system-agent sessions fails", async () => {
+    const disposeSystemAgentSessions = vi.fn(async () => {
+      throw new AggregateError([new Error("session disposal failed")]);
+    });
+    const deps = createGatewayCloseTestDeps({ disposeSystemAgentSessions });
+    const close = createGatewayCloseHandler(deps);
+
+    const result = await close({ reason: "test" });
+
+    expect(disposeSystemAgentSessions).toHaveBeenCalledTimes(1);
+    expect(deps.heartbeatRunner.stop).toHaveBeenCalledTimes(1);
+    expect(result.warnings).toContain("system-agent-sessions");
+  });
+
+  it("does not let system-agent cleanup exceed the restart drain deadline", async () => {
+    vi.useFakeTimers();
+    let releaseDisposal!: () => void;
+    const disposal = new Promise<void>((resolve) => {
+      releaseDisposal = resolve;
+    });
+    const disposeSystemAgentSessions = vi.fn(() => disposal);
+    const deps = createGatewayCloseTestDeps({ disposeSystemAgentSessions });
+    const close = createGatewayCloseHandler(deps);
+
+    const closePromise = close({
+      reason: "gateway restarting",
+      restartExpectedMs: 123,
+      drainTimeoutMs: 0,
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    const result = await closePromise;
+
+    expect(disposeSystemAgentSessions).toHaveBeenCalledOnce();
+    expect(deps.heartbeatRunner.stop).toHaveBeenCalledOnce();
+    expect(result.warnings).toContain("system-agent-sessions");
+    releaseDisposal();
+    await disposal;
+  });
+
+  it("does not let system-agent cleanup consume the normal shutdown watchdog", async () => {
+    vi.useFakeTimers();
+    let releaseDisposal!: () => void;
+    const disposal = new Promise<void>((resolve) => {
+      releaseDisposal = resolve;
+    });
+    const disposeSystemAgentSessions = vi.fn(() => disposal);
+    const deps = createGatewayCloseTestDeps({ disposeSystemAgentSessions });
+    const close = createGatewayCloseHandler(deps);
+
+    const closePromise = close({ reason: "SIGTERM" });
+    await vi.advanceTimersByTimeAsync(5_000);
+    const result = await closePromise;
+
+    expect(disposeSystemAgentSessions).toHaveBeenCalledOnce();
+    expect(deps.heartbeatRunner.stop).toHaveBeenCalledOnce();
+    expect(result.warnings).toContain("system-agent-sessions");
+    releaseDisposal();
+    await disposal;
+  });
+
   it("joins an in-flight config reload before mutable runtime teardown", async () => {
     const events: string[] = [];
     mocks.clearSessionSuspensionTimers.mockImplementation(() => {

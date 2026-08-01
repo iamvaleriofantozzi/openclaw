@@ -87,6 +87,58 @@ struct SystemAgentChatQuestionTests {
         }
     }
 
+    @Test
+    func `QR presentation rejects competing top-level state`() {
+        let invalidResults = [
+            """
+            {
+              "sessionId": "test-session",
+              "reply": "Scan the code.",
+              "action": "open-agent",
+              "presentation": \(Self.qrPresentationJSON)
+            }
+            """,
+            """
+            {
+              "sessionId": "test-session",
+              "reply": "Scan the code.",
+              "action": "none",
+              "wizardInputPending": true,
+              "presentation": \(Self.qrPresentationJSON)
+            }
+            """,
+        ]
+
+        for json in invalidResults {
+            #expect(throws: DecodingError.self) {
+                try JSONDecoder().decode(SystemAgentChatResult.self, from: Data(json.utf8))
+            }
+        }
+    }
+
+    @Test
+    func `QR acknowledgement requires exactly one option`() {
+        let invalidPresentation = Self.qrPresentationJSON.replacingOccurrences(
+            of: #"[{"label":"Continue"}]"#,
+            with: #"[{"label":"Continue"},{"label":"Again"}]"#)
+        let json =
+            """
+            {
+              "sessionId": "test-session",
+              "reply": "Scan the code.",
+              "action": "none",
+              "presentation": \(invalidPresentation)
+            }
+            """
+
+        #expect(throws: DecodingError.self) {
+            try JSONDecoder().decode(SystemAgentChatResult.self, from: Data(json.utf8))
+        }
+    }
+
+    private static let qrPresentationJSON =
+        #"{"kind":"qr","dataUrl":"data:image/png;base64,AAAA","expiresAtMs":1,"wizardInputPending":true,"question":{"id":"setup-qr","header":"Scan QR code","question":"Scan, then continue.","options":[{"label":"Continue"}],"allowSkip":false}}"#
+
     private static func parse(_ questionJSON: String) throws -> SystemAgentChatQuestion? {
         let result = try JSONDecoder().decode(
             SystemAgentChatResult.self,

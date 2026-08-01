@@ -1,3 +1,4 @@
+import type { SystemAgentChatPresentation } from "@openclaw/gateway-protocol";
 import { vi } from "vitest";
 import type {
   GatewayBrowserClient,
@@ -10,12 +11,35 @@ import type {
   ApplicationGateway,
   ApplicationGatewaySnapshot,
 } from "../../app/context.ts";
+import { t } from "../../i18n/index.ts";
 import {
   createApplicationContextProvider,
   type ApplicationContextProvider,
 } from "../../test-helpers/application-context.ts";
 import { CustodianSessionStore } from "./custodian-session-store.ts";
 import "./custodian-page.ts";
+
+export const CUSTODIAN_QR_DATA_URL =
+  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+
+export function createCustodianQrPresentation(
+  dataUrl = CUSTODIAN_QR_DATA_URL,
+  expiresAtMs = Date.now() + 30 * 60 * 1000,
+): SystemAgentChatPresentation {
+  return {
+    kind: "qr" as const,
+    wizardInputPending: true as const,
+    dataUrl,
+    expiresAtMs,
+    question: {
+      id: "link-device",
+      header: "Link a device",
+      question: "Scan the QR code, then continue.",
+      options: [{ label: t("common.continue") }],
+      allowSkip: false as const,
+    },
+  };
+}
 
 type TestCustodianPage = HTMLElement & {
   onboarding: boolean;
@@ -38,9 +62,14 @@ export function createContext(
   options: {
     agentsList?: ApplicationContext["agents"]["state"]["agentsList"];
     channelsSnapshot?: ChannelsStatusSnapshot | null;
+    authenticatedDeviceId?: string | null;
   } = {},
 ): ContextHarness {
-  const client = { request } as unknown as GatewayBrowserClient;
+  const authenticatedDeviceId =
+    options.authenticatedDeviceId === undefined
+      ? "stable-control-ui-device"
+      : options.authenticatedDeviceId;
+  const client = { request, authenticatedDeviceId } as unknown as GatewayBrowserClient;
   let snapshot: ApplicationGatewaySnapshot = {
     client,
     phase: "connected",
@@ -51,6 +80,7 @@ export function createContext(
       protocol: 1,
       auth: { role: "operator", scopes: ["operator.admin"] },
       features: { methods },
+      snapshot: { uptimeMs: 60_000, processInstanceId: "gateway-process-1" },
     },
     assistantAgentId: "main",
     sessionKey: "main",

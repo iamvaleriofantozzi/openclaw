@@ -134,11 +134,16 @@ type GatewaySystemAgentSession = {
       text: string;
       action: "none" | "exit" | "open-tui" | "open-setup";
       sensitive?: boolean;
+      wizardInputPending?: boolean;
+      qrDataUrl?: string;
+      qrExpiresAtMs?: number;
       question?: SystemAgentChatQuestion;
     }>;
     seedHistory: (turns: readonly SystemAgentHistoryTurn[]) => void;
     historyLength: () => number;
     historySince: (index: number) => SystemAgentHistoryTurn[];
+    hasPendingQrCode: () => boolean;
+    getPersistentApplySettlement: () => Promise<void> | null;
     getPendingOperatorProposal: () => { operation: SystemAgentOperation; hash: string } | null;
     resolveOperatorApproval: (
       decision: "allow-once" | "allow-always" | "deny" | null,
@@ -152,6 +157,8 @@ type GatewaySystemAgentSession = {
   welcomeAuditSequence?: number;
   lastUsedAt: number;
   ownerKey: string;
+  /** QR presentation support negotiated when the session was created. */
+  supportsQrCode: boolean;
   pendingApproval?: { id: string; proposalHash: string };
 };
 

@@ -13,6 +13,7 @@ export function renderCustodianQuestionCard(params: {
       .props=${{
         header: params.question.header,
         question: params.question.question,
+        presentation: params.question.presentation,
         options: params.question.options.map((option) => ({
           value: option.label,
           label: option.label,
@@ -21,7 +22,7 @@ export function renderCustodianQuestionCard(params: {
         })),
         disabled: params.disabled,
         onSelect: params.onSelect,
-        onSkip: params.onSkip,
+        onSkip: params.question.allowSkip ? params.onSkip : undefined,
       }}
     ></openclaw-option-card>
   </div>`;

@@ -311,6 +311,7 @@ export class GatewayBrowserClient {
   private pendingDeviceTokenRetry = false;
   private deviceTokenRetryBudgetUsed = false;
   private readonly recoveryScopeTracker = new GatewayRecoveryScopeTracker();
+  private acceptedDeviceId: string | null = null;
 
   constructor(private opts: GatewayBrowserClientOptions) {
     this.client = new GatewayProtocolClient<ConnectPlan>({
@@ -378,6 +379,11 @@ export class GatewayBrowserClient {
 
   get instanceId(): string | undefined {
     return this.opts.instanceId;
+  }
+
+  /** Stable device identity accepted for the current authenticated connection. */
+  get authenticatedDeviceId(): string | null {
+    return this.acceptedDeviceId;
   }
 
   get gatewayUrl(): string {
@@ -491,6 +497,7 @@ export class GatewayBrowserClient {
           GATEWAY_CLIENT_CAPS.TERMINAL_OFFSET_SEQ,
           GATEWAY_CLIENT_CAPS.TOOL_EVENTS,
           GATEWAY_CLIENT_CAPS.INLINE_WIDGETS,
+          GATEWAY_CLIENT_CAPS.SYSTEM_AGENT_QR_CODE,
           GATEWAY_CLIENT_CAPS.UI_COMMANDS,
         ],
         auth: buildGatewayConnectAuth(selectedAuth),
@@ -510,6 +517,7 @@ export class GatewayBrowserClient {
 
   private handleConnectHello(hello: GatewayHelloOk, plan: ConnectPlan) {
     this.startTickWatch(hello);
+    this.acceptedDeviceId = plan.deviceIdentity?.deviceId.trim() || null;
     this.pendingDeviceTokenRetry = false;
     this.deviceTokenRetryBudgetUsed = false;
     this.opts.bootstrapToken = undefined;

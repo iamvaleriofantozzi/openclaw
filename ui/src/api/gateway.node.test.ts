@@ -438,6 +438,7 @@ describe("GatewayBrowserClient", () => {
       GATEWAY_CLIENT_CAPS.TERMINAL_OFFSET_SEQ,
       GATEWAY_CLIENT_CAPS.TOOL_EVENTS,
       GATEWAY_CLIENT_CAPS.INLINE_WIDGETS,
+      GATEWAY_CLIENT_CAPS.SYSTEM_AGENT_QR_CODE,
       GATEWAY_CLIENT_CAPS.UI_COMMANDS,
     ]);
     expect(connectFrame.params?.scopes).toEqual([...CONTROL_UI_OPERATOR_SCOPES]);
@@ -1010,6 +1011,35 @@ describe("GatewayBrowserClient", () => {
       client.stop();
       consoleError.mockRestore();
     }
+  });
+
+  it("exposes the accepted device id before publishing hello", async () => {
+    let observedDeviceId: string | null = null;
+    const onHello = vi.fn(() => {
+      observedDeviceId = client.authenticatedDeviceId;
+    });
+    const client = new GatewayBrowserClient({
+      url: DEFAULT_GATEWAY_URL,
+      token: "shared-auth-token",
+      onHello,
+    });
+    expect(client.authenticatedDeviceId).toBeNull();
+
+    const { ws, connectFrame } = await startConnect(client);
+    ws.emitMessage({
+      type: "res",
+      id: connectFrame.id,
+      ok: true,
+      payload: {
+        type: "hello-ok",
+        protocol: 4,
+        auth: { role: "operator", scopes: [] },
+      },
+    });
+
+    await vi.waitFor(() => expect(onHello).toHaveBeenCalledOnce());
+    expect(observedDeviceId).toBe("device-1");
+    client.stop();
   });
 
   it("publishes a credential-scoped recovery identity after hello", async () => {

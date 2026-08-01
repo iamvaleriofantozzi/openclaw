@@ -55,6 +55,7 @@ describe("custodian page session lifecycle", () => {
     });
     expect(request.mock.calls[2]?.[1]?.sessionId).not.toBe("engine-session-before-error");
     expect(request.mock.calls[2]?.[1]).not.toHaveProperty("message");
+    expect(request.mock.calls[2]?.[1]).not.toHaveProperty("reset");
     expect(page.textContent).toContain("Earlier");
     expect(page.textContent).toContain("started a fresh session");
   });

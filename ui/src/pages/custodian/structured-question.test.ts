@@ -20,11 +20,13 @@ describe("custodian typed question", () => {
       id: "onboarding-next-step",
       header: "Next step",
       question: "What would you like to do first?",
+      presentation: "choices",
       options: [
         { label: "Talk to my agent", reply: "talk to agent", recommended: true },
         { label: "Connect WhatsApp", reply: "connect whatsapp", description: "Chat there." },
       ],
       isOther: true,
+      allowSkip: true,
       skipAction: "exit",
     });
   });
@@ -40,16 +42,32 @@ describe("custodian typed question", () => {
     expect(parsed?.isOther).toBe(false);
   });
 
-  it("rejects malformed questions instead of rendering broken cards", () => {
-    expect(parseCustodianQuestion(undefined)).toBeNull();
+  it("accepts a single acknowledgement action without a skip affordance", () => {
+    const parsed = parseCustodianQuestion({
+      id: "link-device",
+      header: "Link a device",
+      question: "Scan the QR code, then continue.",
+      options: [{ label: "Continue" }],
+      allowSkip: false,
+    });
+    expect(parsed?.options).toEqual([{ label: "Continue" }]);
+    expect(parsed?.allowSkip).toBe(false);
+    expect(parsed?.presentation).toBe("action");
+  });
+
+  it("rejects a skippable single action", () => {
     expect(
       parseCustodianQuestion({
-        id: "one-option",
-        header: "H",
-        question: "Q",
-        options: [{ label: "Only" }],
+        id: "generic-action",
+        header: "Continue",
+        question: "Continue?",
+        options: [{ label: "Continue" }],
       }),
     ).toBeNull();
+  });
+
+  it("rejects malformed questions instead of rendering broken cards", () => {
+    expect(parseCustodianQuestion(undefined)).toBeNull();
     expect(
       parseCustodianQuestion({
         id: "dupes",

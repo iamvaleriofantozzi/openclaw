@@ -1431,6 +1431,7 @@ public struct Snapshot: Codable, Sendable {
     public let health: [String: AnyCodable]
     public let stateversion: StateVersion
     public let uptimems: Int
+    public let processinstanceid: String?
     public let appliedconfighash: AnyCodable?
     public let configpath: String?
     public let statedir: String?
@@ -1443,6 +1444,7 @@ public struct Snapshot: Codable, Sendable {
         health: [String: AnyCodable],
         stateversion: StateVersion,
         uptimems: Int,
+        processinstanceid: String? = nil,
         appliedconfighash: AnyCodable? = nil,
         configpath: String? = nil,
         statedir: String? = nil,
@@ -1454,6 +1456,7 @@ public struct Snapshot: Codable, Sendable {
         self.health = health
         self.stateversion = stateversion
         self.uptimems = uptimems
+        self.processinstanceid = processinstanceid
         self.appliedconfighash = appliedconfighash
         self.configpath = configpath
         self.statedir = statedir
@@ -1467,6 +1470,7 @@ public struct Snapshot: Codable, Sendable {
         case health
         case stateversion = "stateVersion"
         case uptimems = "uptimeMs"
+        case processinstanceid = "processInstanceId"
         case appliedconfighash = "appliedConfigHash"
         case configpath = "configPath"
         case statedir = "stateDir"
@@ -9288,6 +9292,181 @@ public struct SystemAgentChatParams: Codable, Sendable {
     }
 }
 
+public struct SystemAgentChatQuestionOption: Codable, Sendable {
+    public let label: String
+    public let description: String?
+    public let recommended: Bool?
+    public let reply: String?
+
+    public init(
+        label: String,
+        description: String? = nil,
+        recommended: Bool? = nil,
+        reply: String? = nil)
+    {
+        self.label = label
+        self.description = description
+        self.recommended = recommended
+        self.reply = reply
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case label
+        case description
+        case recommended
+        case reply
+    }
+}
+
+public struct SystemAgentChatAcknowledgementQuestion: Codable, Sendable {
+    public let id: String
+    public let header: String
+    public let question: String
+    public let options: [SystemAgentChatQuestionOption]
+    public let allowskip: Bool
+
+    public init(
+        id: String,
+        header: String,
+        question: String,
+        options: [SystemAgentChatQuestionOption]
+    )
+    {
+        self.id = id
+        self.header = header
+        self.question = question
+        self.options = options
+        self.allowskip = false
+        precondition(options.count == 1, "QR acknowledgement requires exactly one option")
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case header
+        case question
+        case options
+        case allowskip = "allowSkip"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let rawContainer = try decoder.container(keyedBy: GatewayAnyCodingKey.self)
+        let unexpectedKeys = rawContainer.allKeys
+            .map(\.stringValue)
+            .filter { !Set(["id", "header", "question", "options", "allowSkip"]).contains($0) }
+        if !unexpectedKeys.isEmpty {
+            throw DecodingError.dataCorrupted(
+                .init(
+                    codingPath: rawContainer.codingPath,
+                    debugDescription: "Unexpected keys for SystemAgentChatAcknowledgementQuestion: \(unexpectedKeys.sorted().joined(separator: ", "))"
+                )
+            )
+        }
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try container.decode(String.self, forKey: .id)
+        self.header = try container.decode(String.self, forKey: .header)
+        self.question = try container.decode(String.self, forKey: .question)
+        self.options = try container.decode([SystemAgentChatQuestionOption].self, forKey: .options)
+        let decodedAllowskip = try container.decode(Bool.self, forKey: .allowskip)
+        guard decodedAllowskip == false else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .allowskip,
+                in: container,
+                debugDescription: "Expected allowSkip to equal false"
+            )
+        }
+        self.allowskip = false
+        guard self.options.count == 1 else {
+            throw DecodingError.dataCorrupted(
+                .init(codingPath: container.codingPath, debugDescription: "QR acknowledgement requires exactly one option")
+            )
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(header, forKey: .header)
+        try container.encode(question, forKey: .question)
+        try container.encode(options, forKey: .options)
+        try container.encode(false, forKey: .allowskip)
+    }
+}
+
+public struct SystemAgentChatPresentation: Codable, Sendable {
+    public let kind: String
+    public let dataurl: String
+    public let expiresatms: Int
+    public let wizardinputpending: Bool
+    public let question: SystemAgentChatAcknowledgementQuestion
+
+    public init(
+        dataurl: String,
+        expiresatms: Int,
+        question: SystemAgentChatAcknowledgementQuestion
+    )
+    {
+        self.kind = "qr"
+        self.dataurl = dataurl
+        self.expiresatms = expiresatms
+        self.wizardinputpending = true
+        self.question = question
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case kind
+        case dataurl = "dataUrl"
+        case expiresatms = "expiresAtMs"
+        case wizardinputpending = "wizardInputPending"
+        case question
+    }
+
+    public init(from decoder: Decoder) throws {
+        let rawContainer = try decoder.container(keyedBy: GatewayAnyCodingKey.self)
+        let unexpectedKeys = rawContainer.allKeys
+            .map(\.stringValue)
+            .filter { !Set(["kind", "dataUrl", "expiresAtMs", "wizardInputPending", "question"]).contains($0) }
+        if !unexpectedKeys.isEmpty {
+            throw DecodingError.dataCorrupted(
+                .init(
+                    codingPath: rawContainer.codingPath,
+                    debugDescription: "Unexpected keys for SystemAgentChatPresentation: \(unexpectedKeys.sorted().joined(separator: ", "))"
+                )
+            )
+        }
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let decodedKind = try container.decode(String.self, forKey: .kind)
+        guard decodedKind == "qr" else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .kind,
+                in: container,
+                debugDescription: "Expected kind to equal qr"
+            )
+        }
+        self.kind = "qr"
+        self.dataurl = try container.decode(String.self, forKey: .dataurl)
+        self.expiresatms = try container.decode(Int.self, forKey: .expiresatms)
+        let decodedWizardinputpending = try container.decode(Bool.self, forKey: .wizardinputpending)
+        guard decodedWizardinputpending == true else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .wizardinputpending,
+                in: container,
+                debugDescription: "Expected wizardInputPending to equal true"
+            )
+        }
+        self.wizardinputpending = true
+        self.question = try container.decode(SystemAgentChatAcknowledgementQuestion.self, forKey: .question)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode("qr", forKey: .kind)
+        try container.encode(dataurl, forKey: .dataurl)
+        try container.encode(expiresatms, forKey: .expiresatms)
+        try container.encode(true, forKey: .wizardinputpending)
+        try container.encode(question, forKey: .question)
+    }
+}
+
 public struct SystemAgentChatResult: Codable, Sendable {
     public let sessionid: String
     public let reply: String
@@ -9299,6 +9478,7 @@ public struct SystemAgentChatResult: Codable, Sendable {
     public let needsapproval: Bool?
     public let proposalid: String?
     public let question: [String: AnyCodable]?
+    public let presentation: SystemAgentChatPresentation?
 
     public init(
         sessionid: String,
@@ -9310,7 +9490,8 @@ public struct SystemAgentChatResult: Codable, Sendable {
         agentid: String? = nil,
         needsapproval: Bool? = nil,
         proposalid: String? = nil,
-        question: [String: AnyCodable]? = nil)
+        question: [String: AnyCodable]? = nil,
+        presentation: SystemAgentChatPresentation? = nil)
     {
         self.sessionid = sessionid
         self.reply = reply
@@ -9322,6 +9503,8 @@ public struct SystemAgentChatResult: Codable, Sendable {
         self.needsapproval = needsapproval
         self.proposalid = proposalid
         self.question = question
+        self.presentation = presentation
+        precondition(Self.hasValidPresentationContract(action: action, wizardinputpending: wizardinputpending, question: question, presentation: presentation), "QR presentation must remain atomic")
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -9335,6 +9518,51 @@ public struct SystemAgentChatResult: Codable, Sendable {
         case needsapproval = "needsApproval"
         case proposalid = "proposalId"
         case question
+        case presentation
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.sessionid = try container.decode(String.self, forKey: .sessionid)
+        self.reply = try container.decode(String.self, forKey: .reply)
+        self.sensitive = try container.decodeIfPresent(Bool.self, forKey: .sensitive)
+        self.wizardinputpending = try container.decodeIfPresent(Bool.self, forKey: .wizardinputpending)
+        self.action = try container.decode(AnyCodable.self, forKey: .action)
+        self.agentdraft = try container.decodeIfPresent(String.self, forKey: .agentdraft)
+        self.agentid = try container.decodeIfPresent(String.self, forKey: .agentid)
+        self.needsapproval = try container.decodeIfPresent(Bool.self, forKey: .needsapproval)
+        self.proposalid = try container.decodeIfPresent(String.self, forKey: .proposalid)
+        self.question = try container.decodeIfPresent([String: AnyCodable].self, forKey: .question)
+        self.presentation = try container.decodeIfPresent(SystemAgentChatPresentation.self, forKey: .presentation)
+        guard Self.hasValidPresentationContract(action: action, wizardinputpending: wizardinputpending, question: question, presentation: presentation) else {
+            throw DecodingError.dataCorrupted(
+                .init(codingPath: container.codingPath, debugDescription: "QR presentation must remain atomic")
+            )
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(sessionid, forKey: .sessionid)
+        try container.encode(reply, forKey: .reply)
+        try container.encodeIfPresent(sensitive, forKey: .sensitive)
+        try container.encodeIfPresent(wizardinputpending, forKey: .wizardinputpending)
+        try container.encode(action, forKey: .action)
+        try container.encodeIfPresent(agentdraft, forKey: .agentdraft)
+        try container.encodeIfPresent(agentid, forKey: .agentid)
+        try container.encodeIfPresent(needsapproval, forKey: .needsapproval)
+        try container.encodeIfPresent(proposalid, forKey: .proposalid)
+        try container.encodeIfPresent(question, forKey: .question)
+        try container.encodeIfPresent(presentation, forKey: .presentation)
+    }
+
+    private static func hasValidPresentationContract(
+        action: AnyCodable,
+        wizardinputpending: Bool?,
+        question: [String: AnyCodable]?,
+        presentation: SystemAgentChatPresentation?
+    ) -> Bool {
+        presentation == nil || ((action.value as? String) == "none" && wizardinputpending == nil && question == nil)
     }
 }
 

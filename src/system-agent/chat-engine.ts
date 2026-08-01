@@ -80,6 +80,8 @@ export type SystemAgentChatEngineOptions = {
   appendAuditEntry?: typeof import("./audit.js").appendSystemAgentAuditEntry;
   /** Where side effects run; the gateway surface never manages its own daemon. */
   surface?: "cli" | "gateway";
+  /** The current chat client can render QR images. */
+  supportsQrCode?: boolean;
   /** Test seam for the channel-setup wizard hosted by the chat bridge. */
   runChannelSetupWizard?: (
     channel: string,
@@ -132,6 +134,10 @@ type SystemAgentChatReply = {
   handoff?: SystemAgentOperation;
   /** Structured choice mirroring the awaited wizard step for card-capable clients. */
   question?: SystemAgentChatQuestion;
+  /** Core-rendered PNG data URL for a hosted wizard QR prompt. */
+  qrDataUrl?: string;
+  /** Absolute deadline after which clients must retire the QR prompt. */
+  qrExpiresAtMs?: number;
 };
 
 type WizardPrompterLike = import("../wizard/prompts.js").WizardPrompter;
@@ -147,6 +153,9 @@ type HostedWizardRunResult = void | HostedWizardCompletion | HostedMemoryImportO
 type ActiveWizardBridge = {
   session: WizardSession;
   step: WizardStep | null;
+  expiryTimer: ReturnType<typeof setTimeout> | undefined;
+  qrExpiresAtMs: number | undefined;
+  qrExpired: boolean;
   kind: "channel" | "skills" | "search" | "gateway" | "memory-import";
   label: string;
   completion: {
@@ -163,6 +172,7 @@ type CaptureRuntime = RuntimeEnv & {
 };
 
 const log = createSubsystemLogger("system-agent/chat-engine");
+const SYSTEM_AGENT_HOSTED_WIZARD_TIMEOUT_MS = 25 * 60 * 1000;
 
 export const GATEWAY_SETUP_AFTER_WRITE = {
   mode: "none",
@@ -488,13 +498,15 @@ function wizardStepChatQuestion(step: WizardStep | null): SystemAgentChatQuestio
     return undefined;
   }
   const options = step.options ?? [];
-  if (options.length < 2 || options.length > 4) {
+  const minimumOptions = step.qrDataUrl ? 1 : 2;
+  if (options.length < minimumOptions || options.length > 4) {
     return undefined;
   }
   return {
     id: step.id,
     header: step.title ?? "Choose one",
     question: step.message ?? "Choose one.",
+    ...(step.qrDataUrl ? { allowSkip: false } : {}),
     options: options.map((option) => {
       const mapped: SystemAgentChatQuestion["options"][number] = { label: option.label };
       if (option.hint) {
@@ -653,6 +665,9 @@ export class SystemAgentChatEngine {
   private verifiedInference: SystemAgentVerifiedInferenceBinding;
   /** Turns run strictly one at a time; interleaved handles corrupt wizard/pending state. */
   private turnQueue: Promise<unknown> = Promise.resolve();
+  private disposed = false;
+  private disposal: Promise<void> | null = null;
+  private persistentApplySettlement: Promise<void> | null = null;
 
   constructor(private readonly opts: SystemAgentChatEngineOptions) {
     const binding = opts?.verifiedInference;
@@ -677,6 +692,17 @@ export class SystemAgentChatEngine {
   hasPendingProposal(): boolean {
     return this.pending !== null;
   }
+
+  /** A visible QR must keep its owning wizard alive until acknowledgement or expiry. */
+  hasPendingQrCode(): boolean {
+    return Boolean(this.wizardBridge?.step?.qrDataUrl);
+  }
+
+  /** A persistent effect that crossed its final authority check must settle before restart. */
+  getPersistentApplySettlement(): Promise<void> | null {
+    return this.persistentApplySettlement;
+  }
+
   getPendingOperatorProposal(): { operation: SystemAgentOperation; hash: string } | null {
     return resolvePendingOperatorProposal(this.pending, this.agentSession.proposalRef);
   }
@@ -684,7 +710,9 @@ export class SystemAgentChatEngine {
     decision: "allow-once" | "allow-always" | "deny" | null,
     proposalHash: string,
   ): Promise<SystemAgentChatReply | null> {
+    this.assertActive();
     const turn = this.turnQueue.then(async () => {
+      this.assertActive();
       const reply = await resolveOperatorApprovalDecision<SystemAgentChatReply>({
         decision,
         proposalHash,
@@ -694,6 +722,7 @@ export class SystemAgentChatEngine {
           this.pending ? this.applyPendingProposal() : this.resolveAssistantTurn(message, true),
         denied: () => ({ text: "Denied. No change.", action: "none" }),
       });
+      this.assertActive();
       if (reply?.text) {
         this.history.push({ role: "assistant", text: reply.text });
       }
@@ -722,14 +751,28 @@ export class SystemAgentChatEngine {
   }
 
   async dispose(): Promise<void> {
-    this.wizardBridge?.session.cancel();
-    this.wizardBridge = null;
-    this.lastSensitiveChannel = undefined;
-    this.awaitingSetupChannel = false;
-    await cleanupSystemAgentSession(this.agentSession);
+    if (!this.disposed) {
+      this.disposed = true;
+      this.clearPendingProposals();
+      this.clearWizardBridge(true);
+      this.lastSensitiveChannel = undefined;
+      this.awaitingSetupChannel = false;
+    }
+    this.disposal ??= (async () => {
+      // A turn admitted before disposal may still be awaiting inference or an
+      // approval classifier. Join it before releasing its session bindings.
+      await this.turnQueue;
+      this.clearPendingProposals();
+      this.clearWizardBridge(true);
+      this.lastSensitiveChannel = undefined;
+      this.awaitingSetupChannel = false;
+      await cleanupSystemAgentSession(this.agentSession);
+    })();
+    await this.disposal;
   }
 
   async handle(text: string, options?: SystemAgentChatTurnOptions): Promise<SystemAgentChatReply> {
+    this.assertActive();
     const turn = this.turnQueue.then(() => this.handleSerialized(text, options));
     // The queue must survive a failed turn or every later message would reject.
     this.turnQueue = turn.catch(() => undefined);
@@ -740,17 +783,21 @@ export class SystemAgentChatEngine {
     text: string,
     options?: SystemAgentChatTurnOptions,
   ): Promise<SystemAgentChatReply> {
+    this.assertActive();
     await this.requireVerifiedInference();
     // Snapshot before resolving: wizard answers to sensitive steps (tokens,
     // passwords) must never enter the AI-visible history.
     const sensitiveTurn = this.wizardBridge?.step?.sensitive === true;
     const resolved = await this.resolveTurn(text, options);
+    // Disposal can win while resolveTurn awaits inference. Do not append a
+    // retired turn to durable history or publish state after that boundary.
+    this.assertActive();
     // The hint belongs to the outgoing message, not to each rendered step: one
     // turn can concatenate several auto-answered notes, and a wizard that just
     // ended must not offer a cancel that can no longer happen.
     const awaitedStep = this.wizardBridge?.step;
     const reply: SystemAgentChatReply =
-      resolved.text && awaitedStep && wizardStepAwaitsInput(awaitedStep)
+      resolved.text && awaitedStep && !awaitedStep.qrDataUrl && wizardStepAwaitsInput(awaitedStep)
         ? { ...resolved, text: `${resolved.text}\n${WIZARD_CANCEL_HINT}` }
         : resolved;
     this.history.push({
@@ -768,6 +815,12 @@ export class SystemAgentChatEngine {
       ...(this.wizardBridge?.step?.sensitive === true ? { sensitive: true } : {}),
       ...(this.wizardBridge ? { wizardInputPending: true } : {}),
       ...(question ? { question } : {}),
+      ...(this.wizardBridge?.step?.qrDataUrl
+        ? { qrDataUrl: this.wizardBridge.step.qrDataUrl }
+        : {}),
+      ...(this.wizardBridge?.step?.qrDataUrl && this.wizardBridge.qrExpiresAtMs !== undefined
+        ? { qrExpiresAtMs: this.wizardBridge.qrExpiresAtMs }
+        : {}),
     };
   }
 
@@ -777,7 +830,10 @@ export class SystemAgentChatEngine {
   ): Promise<SystemAgentChatReply> {
     if (this.wizardBridge) {
       // A hosted wizard consumes every reply until it finishes or is cancelled.
-      return { text: await this.resolveWizardBridgeReply(text), action: "none" };
+      const wizardReply = await this.resolveWizardBridgeReply(text);
+      if (wizardReply !== null) {
+        return { text: wizardReply, action: "none" };
+      }
     }
     const trimmed = text.trim();
     if (!trimmed) {
@@ -1366,6 +1422,7 @@ export class SystemAgentChatEngine {
   }
 
   private async requireVerifiedInference() {
+    this.assertActive();
     const binding = this.verifiedInference;
     if (this.agentSession.verifiedInference !== binding) {
       return this.throwInferenceUnavailable();
@@ -1373,6 +1430,7 @@ export class SystemAgentChatEngine {
     try {
       const route = await resolveSystemAgentVerifiedInferenceRoute(binding, this.opts.deps);
       if (route) {
+        this.assertActive();
         return route;
       }
     } catch (error) {
@@ -1382,6 +1440,7 @@ export class SystemAgentChatEngine {
   }
 
   private async requirePersistentApplyInference(runtime: RuntimeEnv) {
+    this.assertActive();
     const binding = this.verifiedInference;
     if (this.agentSession.verifiedInference !== binding) {
       return this.throwInferenceUnavailable();
@@ -1394,6 +1453,19 @@ export class SystemAgentChatEngine {
         deps: this.opts.deps,
       });
       if (route) {
+        // This is the final authority boundary before a config/file mutation.
+        // A retired Gateway must not commit after its replacement is live.
+        this.assertActive();
+        const settlement = (this.wizardBridge?.session.whenSettled() ?? this.turnQueue).then(
+          () => undefined,
+        );
+        this.persistentApplySettlement = settlement;
+        const clearSettlement = () => {
+          if (this.persistentApplySettlement === settlement) {
+            this.persistentApplySettlement = null;
+          }
+        };
+        void settlement.then(clearSettlement, clearSettlement);
         return route;
       }
     } catch (error) {
@@ -1428,7 +1500,7 @@ export class SystemAgentChatEngine {
     if (cancelWizard) {
       this.wizardBridge?.session.cancel();
     }
-    this.wizardBridge = null;
+    this.clearWizardBridge();
     this.lastSensitiveChannel = undefined;
     this.awaitingSetupChannel = false;
     this.history.splice(0);
@@ -1563,6 +1635,9 @@ export class SystemAgentChatEngine {
     memoryImportProviders?: MemoryImportProviderOutcome[];
     run: (prompter: WizardPrompterLike) => Promise<HostedWizardRunResult>;
   }): Promise<string> {
+    // Disposal may race an admitted model turn. Recheck at the ownership
+    // boundary so that turn cannot install a fresh wizard, secret, or timer.
+    this.assertActive();
     this.lastSensitiveChannel = undefined;
     const completion: ActiveWizardBridge["completion"] = {
       status: "applied",
@@ -1570,23 +1645,85 @@ export class SystemAgentChatEngine {
         ? { memoryImportProviders: params.memoryImportProviders }
         : {}),
     };
-    const session = new WizardSession(async (prompter) => {
-      const result = await params.run(prompter);
-      if (typeof result === "string") {
-        completion.status = result;
-      } else if (result) {
-        completion.memoryImport = result;
-      }
-    });
-    this.wizardBridge = {
+    const session = new WizardSession(
+      async (prompter) => {
+        const result = await params.run(prompter);
+        if (typeof result === "string") {
+          completion.status = result;
+        } else if (result) {
+          completion.memoryImport = result;
+        }
+      },
+      { supportsQrCode: this.opts.supportsQrCode === true },
+    );
+    const bridge: ActiveWizardBridge = {
       session,
       step: null,
+      expiryTimer: undefined,
+      qrExpiresAtMs: undefined,
+      qrExpired: false,
       kind: params.kind,
       label: params.label,
       completion,
       ...(params.autoSelectChannel ? { autoSelectChannel: params.autoSelectChannel } : {}),
     };
+    this.wizardBridge = bridge;
     return await this.pumpWizardBridge();
+  }
+
+  private assertActive(): void {
+    if (this.disposed) {
+      throw new Error("System-agent chat engine has been disposed.");
+    }
+  }
+
+  private clearWizardExpiry(bridge: ActiveWizardBridge): void {
+    if (bridge.expiryTimer) {
+      clearTimeout(bridge.expiryTimer);
+      bridge.expiryTimer = undefined;
+    }
+    bridge.qrExpiresAtMs = undefined;
+  }
+
+  private armWizardQrExpiry(bridge: ActiveWizardBridge): void {
+    this.clearWizardExpiry(bridge);
+    bridge.qrExpired = false;
+    const abandonmentExpiresAtMs = Date.now() + SYSTEM_AGENT_HOSTED_WIZARD_TIMEOUT_MS;
+    bridge.qrExpiresAtMs =
+      bridge.step?.qrExpiresAtMs === undefined
+        ? abandonmentExpiresAtMs
+        : Math.min(bridge.step.qrExpiresAtMs, abandonmentExpiresAtMs);
+    bridge.expiryTimer = setTimeout(
+      () => {
+        this.expireWizardQr(bridge);
+      },
+      Math.max(0, bridge.qrExpiresAtMs - Date.now()),
+    );
+    bridge.expiryTimer.unref?.();
+  }
+
+  private expireWizardQr(bridge: ActiveWizardBridge): void {
+    if (this.wizardBridge !== bridge || !bridge.step?.qrDataUrl) {
+      return;
+    }
+    bridge.session.cancel();
+    // Keep a scrubbed marker until the next queued turn observes expiry.
+    // Otherwise a late Continue becomes unrelated model input.
+    bridge.qrExpired = true;
+    this.clearWizardExpiry(bridge);
+    bridge.step = null;
+  }
+
+  private clearWizardBridge(cancelSession = false): void {
+    const bridge = this.wizardBridge;
+    if (!bridge) {
+      return;
+    }
+    if (cancelSession) {
+      bridge.session.cancel();
+    }
+    this.clearWizardExpiry(bridge);
+    this.wizardBridge = null;
   }
 
   private async startModelSetup(_workspace: string | undefined): Promise<SystemAgentChatReply> {
@@ -1631,7 +1768,7 @@ export class SystemAgentChatEngine {
     }
     const result = await bridge.session.next();
     if (result.done) {
-      this.wizardBridge = null;
+      this.clearWizardBridge();
       const label = bridge.label;
       if (result.status === "done") {
         if (bridge.kind === "memory-import") {
@@ -1704,6 +1841,10 @@ export class SystemAgentChatEngine {
       return `${label[0]?.toUpperCase() ?? "S"}${label.slice(1)} setup stopped: ${result.error ?? "unknown error"}`;
     }
     bridge.step = result.step ?? null;
+    this.clearWizardExpiry(bridge);
+    if (bridge.step?.qrDataUrl) {
+      this.armWizardQrExpiry(bridge);
+    }
     if (bridge.step) {
       const auto = this.tryAutoSelectChannel(bridge.step);
       if (auto) {
@@ -1714,7 +1855,7 @@ export class SystemAgentChatEngine {
       }
       if (this.opts.surface === "cli" && bridge.step.sensitive === true) {
         bridge.session.cancel();
-        this.wizardBridge = null;
+        this.clearWizardBridge();
         if (bridge.kind === "channel") {
           this.lastSensitiveChannel = bridge.label;
           return [
@@ -1876,16 +2017,32 @@ export class SystemAgentChatEngine {
       .join("\n");
   }
 
-  private async resolveWizardBridgeReply(text: string): Promise<string> {
+  private async resolveWizardBridgeReply(text: string): Promise<string | null> {
     const bridge = this.wizardBridge;
     if (!bridge) {
       return "";
     }
+    if (bridge.qrExpiresAtMs !== undefined && Date.now() >= bridge.qrExpiresAtMs) {
+      // Timers can run late under event-loop pressure, so the reply path must
+      // enforce the credential owner's absolute deadline too.
+      this.expireWizardQr(bridge);
+    }
+    if (bridge.qrExpired) {
+      this.clearWizardBridge();
+      // A queued acknowledgement belongs to the expired credential. Other input is a fresh
+      // command and must continue through normal turn routing instead of being consumed here.
+      return /^(?:continue|1)$/i.test(text.trim())
+        ? "This setup QR code expired. Start setup again to get a fresh code."
+        : null;
+    }
+    const step = bridge.step;
     if (/^(cancel|abort|stop|quit|exit)$/i.test(text.trim())) {
+      if (step?.qrDataUrl) {
+        return renderWizardStep(step);
+      }
       bridge.session.cancel();
       return await this.pumpWizardBridge();
     }
-    const step = bridge.step;
     if (!step) {
       return await this.pumpWizardBridge();
     }
@@ -1893,8 +2050,16 @@ export class SystemAgentChatEngine {
     if (!answer) {
       return ["I could not match that answer.", renderWizardStep(step)].join("\n");
     }
+    // Stop publishing the step before the producer resumes. WizardSession scrubs QR bytes after
+    // successful validation; failures restore the intact prompt and its expiry timer for retry.
+    this.clearWizardExpiry(bridge);
+    bridge.step = null;
     const validationError = await bridge.session.answer(step.id, answer.value);
     if (validationError) {
+      bridge.step = step;
+      if (step.qrDataUrl) {
+        this.armWizardQrExpiry(bridge);
+      }
       return [validationError, renderWizardStep(step)].join("\n\n");
     }
     return await this.pumpWizardBridge();

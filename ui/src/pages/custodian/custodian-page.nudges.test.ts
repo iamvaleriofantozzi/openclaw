@@ -336,7 +336,10 @@ describe("custodian page nudges", () => {
 
     setGatewayToken("new-operator-token");
     setGatewaySnapshot({
-      client: { request } as unknown as GatewayBrowserClient,
+      client: {
+        request,
+        authenticatedDeviceId: "stable-control-ui-device",
+      } as unknown as GatewayBrowserClient,
       phase: "connected",
     });
     await waitForFast(() => expect(page.querySelector(".custodian__nudge")).toBeNull());
@@ -721,7 +724,7 @@ describe("custodian page nudges", () => {
     expect(request).toHaveBeenCalledTimes(2);
   });
 
-  it("ignores a stale question reply outcome after a same-owner reconnect", async () => {
+  it("rotates away from a stale question reply after a same-owner reconnect", async () => {
     let resolveQuestion!: (value: { sessionId: string; reply: string; action: "none" }) => void;
     const request = vi
       .fn()
@@ -742,8 +745,22 @@ describe("custodian page nudges", () => {
           new Promise((resolve) => {
             resolveQuestion = resolve;
           }),
-      );
+      )
+      .mockResolvedValueOnce({
+        sessionId: "fresh-session-after-reconnect",
+        reply: "Fresh welcome after reconnect.",
+        action: "none",
+      });
     const { context, emitGatewayEvent, setGatewaySnapshot } = createContext(request);
+    setGatewaySnapshot({
+      hello: {
+        ...context.gateway.snapshot.hello!,
+        auth: {
+          ...context.gateway.snapshot.hello!.auth,
+          deviceToken: "stable-device-token",
+        },
+      },
+    });
     const { page } = await mountPage(context, { onboarding: false });
     await waitForFast(() => expect(request).toHaveBeenCalledOnce());
 
@@ -760,7 +777,7 @@ describe("custodian page nudges", () => {
     setGatewaySnapshot({ phase: "reconnecting" });
     await page.updateComplete;
     setGatewaySnapshot({ phase: "connected" });
-    await page.updateComplete;
+    await waitForFast(() => expect(page.textContent).toContain("Fresh welcome after reconnect."));
     resolveQuestion({
       sessionId: "control-ui-onboarding-00000000-0000-4000-8000-000000000001",
       reply: "Moving on.",
@@ -770,45 +787,49 @@ describe("custodian page nudges", () => {
     await Promise.resolve();
     await page.updateComplete;
     const action = page.querySelector<HTMLButtonElement>(".custodian__nudge-action")!;
-    expect(action.disabled).toBe(true);
-    action.click();
-    expect(request).toHaveBeenCalledTimes(2);
+    expect(action.disabled).toBe(false);
+    expect(page.textContent).not.toContain("Moving on.");
+    expect(request).toHaveBeenCalledTimes(3);
   });
 
-  it("restores an event nudge after its request fails", async () => {
-    const request = vi
-      .fn()
-      .mockResolvedValueOnce({
-        sessionId: "control-ui-onboarding-00000000-0000-4000-8000-000000000001",
-        reply: "Everything is healthy.",
-        action: "none",
-      })
-      .mockRejectedValueOnce(
-        new GatewayRequestError({ code: "INVALID_REQUEST", message: "Request failed" }),
-      );
-    const { context, emitGatewayEvent } = createContext(request);
-    const { page } = await mountPage(context, { onboarding: false });
-    await waitForFast(() => expect(request).toHaveBeenCalledOnce());
+  it.each(["INVALID_REQUEST", "FORBIDDEN"])(
+    "restores an event nudge after a sent request is definitively rejected with %s",
+    async (code) => {
+      const request = vi
+        .fn()
+        .mockResolvedValueOnce({
+          sessionId: "control-ui-onboarding-00000000-0000-4000-8000-000000000001",
+          reply: "Everything is healthy.",
+          action: "none",
+        })
+        .mockImplementationOnce((_method, _params, options?: { onSent?: () => void }) => {
+          options?.onSent?.();
+          return Promise.reject(new GatewayRequestError({ code, message: "Request failed" }));
+        });
+      const { context, emitGatewayEvent } = createContext(request);
+      const { page } = await mountPage(context, { onboarding: false });
+      await waitForFast(() => expect(request).toHaveBeenCalledOnce());
 
-    emitGatewayEvent({
-      event: "health",
-      payload: {
-        channelLabels: { telegram: "Telegram" },
-        channels: {
-          telegram: { configured: true, tokenStatus: "configured_unavailable" },
+      emitGatewayEvent({
+        event: "health",
+        payload: {
+          channelLabels: { telegram: "Telegram" },
+          channels: {
+            telegram: { configured: true, tokenStatus: "configured_unavailable" },
+          },
         },
-      },
-    });
-    await page.updateComplete;
-    page.querySelector<HTMLButtonElement>(".custodian__nudge-action")!.click();
+      });
+      await page.updateComplete;
+      page.querySelector<HTMLButtonElement>(".custodian__nudge-action")!.click();
 
-    await waitForFast(() => expect(request).toHaveBeenCalledTimes(2));
-    await waitForFast(() => expect(page.querySelector('[role="alert"]')).not.toBeNull());
-    await page.updateComplete;
-    expect(page.querySelector(".custodian__nudge")?.textContent).toContain(
-      "Telegram authentication degraded",
-    );
-  });
+      await waitForFast(() => expect(request).toHaveBeenCalledTimes(2));
+      await waitForFast(() => expect(page.querySelector('[role="alert"]')).not.toBeNull());
+      await page.updateComplete;
+      expect(page.querySelector(".custodian__nudge")?.textContent).toContain(
+        "Telegram authentication degraded",
+      );
+    },
+  );
 
   it("consumes a delivered nudge whose reply becomes stale during reconnect", async () => {
     let resolveNudge!: (value: { sessionId: string; reply: string; action: "none" }) => void;

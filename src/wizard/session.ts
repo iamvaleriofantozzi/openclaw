@@ -1,12 +1,23 @@
 // Wizard session helpers track onboarding session ids and state.
 import { randomUUID } from "node:crypto";
 import type { WizardStep as ProtocolWizardStep } from "../../packages/gateway-protocol/src/index.js";
+import { QR_PNG_DATA_URL_MAX_LENGTH } from "../../packages/gateway-protocol/src/schema/qr.js";
+import { renderQrPngDataUrlWithinLimit } from "../media/qr-image.js";
 import { createDeferred, type Deferred } from "../shared/deferred.js";
-import { WizardCancelledError, type WizardProgress, type WizardPrompter } from "./prompts.js";
+import {
+  WizardCancelledError,
+  type WizardProgress,
+  type WizardPrompter,
+  type WizardQrCodeParams,
+} from "./prompts.js";
 
 // WizardSession exposes interactive setup as a step/answer protocol for remote
 // clients while reusing the same WizardPrompter contract as the local CLI.
-export type WizardStep = ProtocolWizardStep;
+export type WizardStep = ProtocolWizardStep & {
+  /** Internal system-agent presentation; generic wizard RPCs never enable QR rendering. */
+  qrDataUrl?: string;
+  qrExpiresAtMs?: number;
+};
 
 type WizardStepInputRequirement = "always" | "never" | "client-executor";
 
@@ -60,7 +71,38 @@ function normalizeTextAnswer(value: unknown): string | undefined {
 }
 
 class WizardSessionPrompter implements WizardPrompter {
-  constructor(private session: WizardSession) {}
+  readonly qrCode?: (params: WizardQrCodeParams) => Promise<boolean>;
+
+  constructor(
+    private session: WizardSession,
+    supportsQrCode: boolean,
+  ) {
+    if (supportsQrCode) {
+      this.qrCode = async (params) => {
+        if (
+          params.expiresAtMs !== undefined &&
+          (!Number.isSafeInteger(params.expiresAtMs) || params.expiresAtMs < 0)
+        ) {
+          throw new RangeError("expiresAtMs must be a non-negative safe integer.");
+        }
+        const qrDataUrl = await renderQrPngDataUrlWithinLimit(
+          params.text,
+          QR_PNG_DATA_URL_MAX_LENGTH,
+        );
+        const result = await this.prompt({
+          type: "select",
+          title: params.title,
+          message: params.message,
+          options: [{ value: true, label: "Continue" }],
+          initialValue: true,
+          qrDataUrl,
+          ...(params.expiresAtMs !== undefined ? { qrExpiresAtMs: params.expiresAtMs } : {}),
+          executor: "client",
+        });
+        return Boolean(result);
+      };
+    }
+  }
 
   async intro(title: string): Promise<void> {
     await this.prompt({
@@ -273,9 +315,9 @@ export class WizardSession {
       signal: AbortSignal,
       session: WizardSession,
     ) => Promise<void>,
-    options?: { timeoutMs?: number },
+    options?: { timeoutMs?: number; supportsQrCode?: boolean },
   ) {
-    const prompter = new WizardSessionPrompter(this);
+    const prompter = new WizardSessionPrompter(this, options?.supportsQrCode === true);
     if (options?.timeoutMs !== undefined) {
       this.expiryTimer = setTimeout(() => this.cancel(), options.timeoutMs);
       this.expiryTimer.unref?.();
@@ -347,6 +389,11 @@ export class WizardSession {
       return validationError;
     }
     this.answerDeferred.delete(stepId);
+    // The host may retain the delivered step while the producer resumes. Scrub credential-bearing
+    // presentation bytes before resolving the producer so acknowledgement is the lifetime boundary.
+    if (this.currentStep?.qrDataUrl) {
+      delete this.currentStep.qrDataUrl;
+    }
     this.currentStep = null;
     pending.deferred.resolve(normalizedValue);
     return undefined;
@@ -359,6 +406,11 @@ export class WizardSession {
     this.status = "cancelled";
     this.error = "cancelled";
     this.abortController.abort(new WizardCancelledError());
+    // The bridge may retain this same step object after delivery. Scrub credential-bearing
+    // presentation bytes before releasing the producer and dropping the session-owned pointer.
+    if (this.currentStep?.qrDataUrl) {
+      delete this.currentStep.qrDataUrl;
+    }
     this.currentStep = null;
     for (const [, pending] of this.answerDeferred) {
       // Reject all pending prompt promises so the runner can unwind through its

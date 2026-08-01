@@ -19,6 +19,7 @@ export type CustodianMessage = {
   text: string;
   at: number;
   question: CustodianStructuredQuestion | null;
+  qrDataUrl?: string;
 };
 
 export function hasUnresolvedCustodianQuestion(
@@ -51,6 +52,62 @@ export function retireCustodianQuestions(
     }
   }
   return answered;
+}
+
+export function scrubCustodianQrCodes(messages: readonly CustodianMessage[]): {
+  messages: CustodianMessage[];
+  qrDataUrls: Map<number, string>;
+} {
+  const qrDataUrls = new Map<number, string>();
+  const scrubbed = messages.map((message) => {
+    if (!message.qrDataUrl) {
+      return message;
+    }
+    qrDataUrls.set(message.id, message.qrDataUrl);
+    const { qrDataUrl: _qrDataUrl, ...rest } = message;
+    return rest;
+  });
+  return { messages: scrubbed, qrDataUrls };
+}
+
+export function retireCustodianQrPresentation(
+  messages: readonly CustodianMessage[],
+): CustodianMessage[] {
+  const snapshot = scrubCustodianQrCodes(messages);
+  for (const message of snapshot.messages) {
+    // Scrubbing clones QR-bearing messages, so clearing their action cannot
+    // mutate caller-owned transcript objects retained by another surface.
+    if (snapshot.qrDataUrls.has(message.id)) {
+      message.question = null;
+    }
+  }
+  return snapshot.messages;
+}
+
+export function expireCustodianQrPresentation(messages: readonly CustodianMessage[]): {
+  messages: CustodianMessage[];
+  expired: boolean;
+} {
+  let expired = false;
+  const nextMessages = messages.map((message) => {
+    if (!message.qrDataUrl) {
+      return message;
+    }
+    expired = true;
+    const { qrDataUrl: _qrDataUrl, ...withoutQr } = message;
+    return { ...withoutQr, text: t("custodian.qrExpired"), question: null };
+  });
+  return { messages: nextMessages, expired };
+}
+
+export function restoreCustodianQrCodes(
+  messages: readonly CustodianMessage[],
+  qrDataUrls: ReadonlyMap<number, string>,
+): CustodianMessage[] {
+  return messages.map((message) => {
+    const qrDataUrl = qrDataUrls.get(message.id);
+    return qrDataUrl ? { ...message, qrDataUrl } : message;
+  });
 }
 
 export function createCustodianSessionId(): string {
@@ -141,6 +198,7 @@ export function renderCustodianTranscriptEntry(params: {
   boundaryAfterId: number | null;
   assistantAvatar: string;
   showQuestion: boolean;
+  showQrCode: boolean;
   questionDisabled: boolean;
   onSelect: (label: string) => void;
   onSkip: () => void;
@@ -154,6 +212,11 @@ export function renderCustodianTranscriptEntry(params: {
           assistantName: t("custodian.title"),
           assistantAvatar: params.assistantAvatar,
         })
+      : nothing}
+    ${params.showQrCode && params.message.qrDataUrl
+      ? html`<div class="custodian__qr-code">
+          <img src=${params.message.qrDataUrl} alt=${t("custodian.setupQrCodeAlt")} />
+        </div>`
       : nothing}
     ${renderCustodianEarlierDivider(params.message, params.boundaryAfterId)}
     ${params.showQuestion && question

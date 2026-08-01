@@ -11,6 +11,7 @@ import {
 } from "../agents/execution-auth-binding.js";
 import { hashSystemAgentOperation } from "../agents/tools/system-agent-tool.js";
 import type { ConfigFileSnapshot, OpenClawConfig } from "../config/types.openclaw.js";
+import { createDeferred } from "../test-utils/deferred.js";
 import type { WizardPrompter } from "../wizard/prompts.js";
 import type { runSetupMemoryImportStep } from "../wizard/setup.memory-import.js";
 import { runSystemAgentTurnWithDeps } from "./agent-turn.test-support.js";
@@ -31,6 +32,9 @@ import {
   type SystemAgentVerifiedInferenceBinding,
   type SystemAgentVerifiedInferenceDeps,
 } from "./verified-inference.js";
+
+const QR_TEXT = "https://example.test/pair";
+const SYSTEM_AGENT_HOSTED_WIZARD_TIMEOUT_MS = 25 * 60 * 1000;
 
 const mocks = vi.hoisted(() => ({
   readConfigFileSnapshot: vi.fn(async () => ({
@@ -787,6 +791,237 @@ describe("SystemAgentChatEngine", () => {
     expect(done.text).toContain("telegram is configured");
     expect(done.question).toBeUndefined();
     expect(wizardRuns).toEqual(["telegram", "token:123:abc", "mode:open"]);
+  });
+
+  it.each(["cancel", "abort", "stop", "quit", "exit"])(
+    "keeps a negotiated QR wizard step pending for the %s alias",
+    async (cancelAlias) => {
+      let acknowledged: boolean | undefined;
+      const engine = new SystemAgentChatEngine({
+        runAgentTurn: async () => null,
+        planWithAssistant: async () => null,
+        deps: { loadOverview: fakeOverviewLoader() },
+        supportsQrCode: true,
+        runChannelSetupWizard: async (_channel: string, prompter: WizardPrompter) => {
+          acknowledged = await prompter.qrCode?.({
+            title: "Link a device",
+            message: "Scan this QR code, then continue.",
+            text: QR_TEXT,
+          });
+        },
+      });
+
+      const prompt = await engine.handle("connect telegram");
+
+      expect(prompt).toMatchObject({
+        text: expect.stringContaining("Scan this QR code"),
+        wizardInputPending: true,
+        qrDataUrl: expect.stringMatching(/^data:image\/png;base64,/u),
+        qrExpiresAtMs: expect.any(Number),
+        question: {
+          id: expect.any(String),
+          header: "Link a device",
+          question: "Scan this QR code, then continue.",
+          options: [{ label: "Continue", recommended: true }],
+          allowSkip: false,
+        },
+      });
+      expect(engine.hasPendingQrCode()).toBe(true);
+
+      const stillPending = await engine.handle(cancelAlias);
+      expect(stillPending).toMatchObject({
+        text: expect.stringContaining("Scan this QR code"),
+        qrDataUrl: prompt.qrDataUrl,
+        qrExpiresAtMs: prompt.qrExpiresAtMs,
+        question: { allowSkip: false, options: [{ label: "Continue" }] },
+      });
+      expect(stillPending.text).not.toContain("Say `cancel`");
+      expect(acknowledged).toBeUndefined();
+
+      const done = await engine.handle("Continue");
+      expect(done.text).toContain("telegram is configured");
+      expect(done.qrDataUrl).toBeUndefined();
+      expect(acknowledged).toBe(true);
+      expect(engine.hasPendingQrCode()).toBe(false);
+    },
+  );
+
+  it("releases bridged QR bytes while the producer prepares its next step", async () => {
+    let acknowledged = false;
+    let releaseProducer = () => {};
+    const producerBlocked = new Promise<void>((resolve) => {
+      releaseProducer = resolve;
+    });
+    const engine = new SystemAgentChatEngine({
+      runAgentTurn: async () => null,
+      planWithAssistant: async () => null,
+      deps: { loadOverview: fakeOverviewLoader() },
+      supportsQrCode: true,
+      runChannelSetupWizard: async (_channel: string, prompter: WizardPrompter) => {
+        acknowledged = Boolean(
+          await prompter.qrCode?.({
+            title: "Link a device",
+            message: "Scan this QR code, then continue.",
+            text: QR_TEXT,
+          }),
+        );
+        await producerBlocked;
+      },
+    });
+
+    const prompt = await engine.handle("connect telegram");
+    expect(prompt.qrDataUrl).toMatch(/^data:image\/png;base64,/u);
+    const deliveredStep = (
+      engine as unknown as {
+        wizardBridge: { step: { qrDataUrl?: string } | null } | null;
+      }
+    ).wizardBridge?.step;
+    expect(deliveredStep?.qrDataUrl).toMatch(/^data:image\/png;base64,/u);
+
+    const continuation = engine.handle("Continue");
+    await vi.waitFor(() => expect(acknowledged).toBe(true));
+    expect(deliveredStep?.qrDataUrl).toBeUndefined();
+    expect(
+      (
+        engine as unknown as {
+          wizardBridge: { step: { qrDataUrl?: string } | null } | null;
+        }
+      ).wizardBridge?.step,
+    ).toBeNull();
+
+    releaseProducer();
+    const done = await continuation;
+    expect(done.qrDataUrl).toBeUndefined();
+    expect(done.text).toContain("telegram is configured");
+  });
+
+  it("expires an abandoned hosted QR wizard and releases its bridged bytes", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+    vi.setSystemTime(1_800_000_000_000);
+    try {
+      const engine = new SystemAgentChatEngine({
+        runAgentTurn: async () => null,
+        planWithAssistant: async () => null,
+        deps: { loadOverview: fakeOverviewLoader() },
+        supportsQrCode: true,
+        runChannelSetupWizard: async (_channel: string, prompter: WizardPrompter) => {
+          await prompter.qrCode?.({
+            title: "Link a device",
+            message: "Scan this QR code, then continue.",
+            text: QR_TEXT,
+          });
+        },
+      });
+
+      const promptStartedAt = Date.now();
+      const prompt = await engine.handle("connect telegram");
+      expect(prompt.qrDataUrl).toMatch(/^data:image\/png;base64,/u);
+      expect(prompt.qrExpiresAtMs).toBe(promptStartedAt + SYSTEM_AGENT_HOSTED_WIZARD_TIMEOUT_MS);
+
+      await vi.advanceTimersByTimeAsync(SYSTEM_AGENT_HOSTED_WIZARD_TIMEOUT_MS - 1);
+      expect(engine.hasPendingQrCode()).toBe(true);
+      await vi.advanceTimersByTimeAsync(1);
+
+      expect(
+        (
+          engine as unknown as {
+            wizardBridge: unknown;
+          }
+        ).wizardBridge,
+      ).not.toBeNull();
+      expect(engine.hasPendingQrCode()).toBe(false);
+
+      const restartedAt = Date.now();
+      const restarted = await engine.handle("connect telegram");
+      expect(restarted.qrDataUrl).toMatch(/^data:image\/png;base64,/u);
+      expect(restarted.qrExpiresAtMs).toBe(restartedAt + SYSTEM_AGENT_HOSTED_WIZARD_TIMEOUT_MS);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("honors a QR credential owner's earlier expiry deadline", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+    vi.setSystemTime(1_800_000_000_000);
+    try {
+      const ownerExpiresAtMs = Date.now() + 60_000;
+      const engine = new SystemAgentChatEngine({
+        runAgentTurn: async () => null,
+        planWithAssistant: async () => null,
+        deps: { loadOverview: fakeOverviewLoader() },
+        supportsQrCode: true,
+        runChannelSetupWizard: async (_channel: string, prompter: WizardPrompter) => {
+          await prompter.qrCode?.({
+            title: "Link a device",
+            message: "Scan this QR code, then continue.",
+            text: QR_TEXT,
+            expiresAtMs: ownerExpiresAtMs,
+          });
+        },
+      });
+
+      const prompt = await engine.handle("connect telegram");
+      expect(prompt.qrExpiresAtMs).toBe(ownerExpiresAtMs);
+
+      vi.setSystemTime(ownerExpiresAtMs - 1);
+      expect(engine.hasPendingQrCode()).toBe(true);
+      vi.setSystemTime(ownerExpiresAtMs);
+      // Moving wall time does not run the timer callback, which models an
+      // overdue acknowledgement queued while the event loop is busy.
+      expect(engine.hasPendingQrCode()).toBe(true);
+
+      const expired = await engine.handle("Continue");
+      expect(expired.text).toContain("expired");
+      expect(expired.qrDataUrl).toBeUndefined();
+      expect(engine.hasPendingQrCode()).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not expire a non-QR hosted wizard", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const engine = new SystemAgentChatEngine({
+        runAgentTurn: async () => null,
+        planWithAssistant: async () => null,
+        deps: { loadOverview: fakeOverviewLoader() },
+        runChannelSetupWizard: async (_channel: string, prompter: WizardPrompter) => {
+          await prompter.text({ message: "Bot token", sensitive: true });
+        },
+      });
+
+      const prompt = await engine.handle("connect telegram");
+      expect(prompt.sensitive).toBe(true);
+
+      await vi.advanceTimersByTimeAsync(SYSTEM_AGENT_HOSTED_WIZARD_TIMEOUT_MS);
+
+      const completed = await engine.handle("late-secret-value");
+      expect(completed.text).toContain("telegram is configured");
+      expect(JSON.stringify(engine.historySince(0))).not.toContain("late-secret-value");
+      expect(JSON.stringify(engine.historySince(0))).toContain("<redacted secret>");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps generic one-option wizard selections prose-only", async () => {
+    const engine = new SystemAgentChatEngine({
+      runAgentTurn: async () => null,
+      planWithAssistant: async () => null,
+      deps: { loadOverview: fakeOverviewLoader() },
+      runChannelSetupWizard: async (_channel: string, prompter: WizardPrompter) => {
+        await prompter.select({
+          message: "Only one route",
+          options: [{ value: "only", label: "Only option" }],
+        });
+      },
+    });
+
+    const prompt = await engine.handle("connect telegram");
+
+    expect(prompt.text).toContain("1. Only option");
+    expect(prompt.question).toBeUndefined();
   });
 
   it("hosts the real skills setup flow and guards installs plus the final config write", async () => {
@@ -2307,6 +2542,71 @@ describe("SystemAgentChatEngine", () => {
     expect(reply.text).toContain("Bot token");
   });
 
+  it("does not install a hosted wizard after disposal races an admitted turn", async () => {
+    let releaseAgentTurn!: () => void;
+    let markAgentTurnStarted!: () => void;
+    const agentTurnStarted = new Promise<void>((resolve) => {
+      markAgentTurnStarted = resolve;
+    });
+    const agentTurnBlocked = new Promise<void>((resolve) => {
+      releaseAgentTurn = resolve;
+    });
+    const runChannelSetupWizard = vi.fn(async () => {});
+    const engine = new SystemAgentChatEngine({
+      runAgentTurn: async () => {
+        markAgentTurnStarted();
+        await agentTurnBlocked;
+        return {
+          text: "Telegram it is.",
+          directive: { kind: "channel-setup" as const, channel: "telegram" },
+        };
+      },
+      deps: { loadOverview: fakeOverviewLoader() },
+      runChannelSetupWizard,
+    });
+
+    const pendingTurn = engine.handle("please connect telegram");
+    await agentTurnStarted;
+    let disposalSettled = false;
+    const disposal = engine.dispose().then(() => {
+      disposalSettled = true;
+    });
+    await Promise.resolve();
+    expect(disposalSettled).toBe(false);
+    releaseAgentTurn();
+
+    await expect(pendingTurn).rejects.toThrow("has been disposed");
+    await disposal;
+    expect(disposalSettled).toBe(true);
+    expect(runChannelSetupWizard).not.toHaveBeenCalled();
+    expect(engine.hasPendingQrCode()).toBe(false);
+    await expect(engine.handle("try again")).rejects.toThrow("has been disposed");
+  });
+
+  it("does not apply a persistent proposal after disposal wins approval classification", async () => {
+    const classificationStarted = createDeferred();
+    const releaseClassification = createDeferred();
+    const runConfigSet = vi.fn(async () => {});
+    const engine = new SystemAgentChatEngine({
+      classifyApproval: async () => {
+        classificationStarted.resolve();
+        await releaseClassification.promise;
+        return "approve";
+      },
+      deps: { runConfigSet, loadOverview: fakeOverviewLoader() },
+    });
+    engine.propose({ kind: "config-set", path: "gateway.port", value: "19001" });
+
+    const pendingTurn = engine.handle("yes");
+    await classificationStarted.promise;
+    const disposal = engine.dispose();
+    releaseClassification.resolve();
+
+    await expect(pendingTurn).rejects.toThrow("has been disposed");
+    await disposal;
+    expect(runConfigSet).not.toHaveBeenCalled();
+  });
+
   it("rejects an agent directive when the verified route changes during its turn", async () => {
     const baseConfig = {
       agents: { defaults: { model: "openai/gpt-5.5" } },
@@ -2864,8 +3164,13 @@ describe("SystemAgentChatEngine", () => {
     } satisfies OpenClawConfig;
     const verifiedInference = await createAmbientVerifiedBinding(baseConfig);
     const reboundInference = await createAmbientVerifiedBinding(changedConfig);
+    const applyStarted = createDeferred();
+    const releaseApply = createDeferred();
     let currentConfig: OpenClawConfig = baseConfig;
     const executeOperation = vi.fn(async (_operation, runtime, options) => {
+      await options.beforePersistentApply?.();
+      applyStarted.resolve();
+      await releaseApply.promise;
       currentConfig = changedConfig;
       options.onVerifiedInferenceChanged?.(reboundInference);
       runtime.log("Default model: openai/gpt-5.6-sol");
@@ -2893,7 +3198,14 @@ describe("SystemAgentChatEngine", () => {
       },
     });
 
-    const changed = await engine.handle("switch models");
+    const changedPromise = engine.handle("switch models");
+    await applyStarted.promise;
+    const persistentApplySettlement = engine.getPersistentApplySettlement();
+    expect(persistentApplySettlement).not.toBeNull();
+    releaseApply.resolve();
+    const changed = await changedPromise;
+    await expect(persistentApplySettlement).resolves.toBeUndefined();
+    expect(engine.getPersistentApplySettlement()).toBeNull();
     const next = await engine.handle("which model is active now?");
 
     expect(changed.text).toContain("Default model: openai/gpt-5.6-sol");

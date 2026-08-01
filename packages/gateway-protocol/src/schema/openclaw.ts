@@ -3,6 +3,7 @@ import type { Static } from "typebox";
 import { Type } from "typebox";
 import { closedObject } from "./closed-object.js";
 import { NonEmptyString } from "./primitives.js";
+import { QrPngDataUrlSchema } from "./qr.js";
 import { WizardStartResultSchema } from "./wizard.js";
 
 /**
@@ -48,49 +49,96 @@ export const SystemAgentChatParamsSchema = closedObject({
  * options and send back `reply` (default: `label`) as the next message; text
  * clients ignore this and use the reply prose, which always stands alone.
  */
-export const SystemAgentChatQuestionSchema = closedObject({
+export const SystemAgentChatQuestionOptionSchema = closedObject({
+  label: NonEmptyString,
+  description: Type.Optional(Type.String()),
+  recommended: Type.Optional(Type.Boolean()),
+  /** Message text a client sends when this option is chosen; defaults to label. */
+  reply: Type.Optional(NonEmptyString),
+});
+
+const SystemAgentChatQuestionBaseFields = {
   id: NonEmptyString,
   header: NonEmptyString,
   question: NonEmptyString,
-  options: Type.Array(
-    closedObject({
-      label: NonEmptyString,
-      description: Type.Optional(Type.String()),
-      recommended: Type.Optional(Type.Boolean()),
-      /** Message text a client sends when this option is chosen; defaults to label. */
-      reply: Type.Optional(NonEmptyString),
-    }),
-    { minItems: 2, maxItems: 4 },
-  ),
+};
+
+const SystemAgentChatChoiceQuestionFields = {
+  ...SystemAgentChatQuestionBaseFields,
   /** Free-text answers are also accepted for this question. */
   isOther: Type.Optional(Type.Boolean()),
   /** Client-owned action for the visible skip control; omitted means send a reply. */
   skipAction: Type.Optional(Type.Literal("exit")),
+};
+
+export const SystemAgentChatAcknowledgementQuestionSchema = closedObject({
+  ...SystemAgentChatQuestionBaseFields,
+  options: Type.Tuple([SystemAgentChatQuestionOptionSchema]),
+  /** A single option is an acknowledgement action, never a skippable choice. */
+  allowSkip: Type.Literal(false),
+});
+
+const SystemAgentChatChoiceQuestionSchema = closedObject({
+  ...SystemAgentChatChoiceQuestionFields,
+  options: Type.Array(SystemAgentChatQuestionOptionSchema, { minItems: 2, maxItems: 4 }),
+  /** False omits the visible skip/cancel action. */
+  allowSkip: Type.Optional(Type.Boolean()),
+});
+
+export const SystemAgentChatQuestionSchema = Type.Union([
+  SystemAgentChatAcknowledgementQuestionSchema,
+  SystemAgentChatChoiceQuestionSchema,
+]);
+
+export const SystemAgentChatPresentationSchema = closedObject({
+  kind: Type.Literal("qr"),
+  /** Core-rendered QR image for clients that negotiated presentation support. */
+  dataUrl: QrPngDataUrlSchema,
+  /** Absolute deadline after which clients must retire the QR image and action. */
+  expiresAtMs: Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
+  /** QR presentation always awaits its non-skippable acknowledgement action. */
+  wizardInputPending: Type.Literal(true),
+  question: SystemAgentChatAcknowledgementQuestionSchema,
 });
 
 /** One OpenClaw reply; `action` tells clients about conversation handoffs. */
-export const SystemAgentChatResultSchema = closedObject({
-  sessionId: NonEmptyString,
-  reply: NonEmptyString,
-  /** The next reply is a hosted-wizard secret and clients must mask its input/echo. */
-  sensitive: Type.Optional(Type.Boolean()),
-  /** The hosted wizard will consume the next message as its current step answer. */
-  wizardInputPending: Type.Optional(Type.Boolean()),
-  action: Type.Union([
-    Type.Literal("none"),
-    // The user asked to talk to their agent; clients should move to their
-    // normal agent chat surface.
-    Type.Literal("open-agent"),
-    Type.Literal("exit"),
-  ]),
-  /** Optional localized-draft intent for an `open-agent` handoff. */
-  agentDraft: Type.Optional(Type.Literal("hatch")),
-  /** Destination agent for a specific `open-agent` handoff. */
-  agentId: Type.Optional(NonEmptyString),
-  needsApproval: Type.Optional(Type.Boolean()),
-  proposalId: Type.Optional(NonEmptyString),
-  question: Type.Optional(SystemAgentChatQuestionSchema),
-});
+export const SystemAgentChatResultSchema = Type.Object(
+  {
+    sessionId: NonEmptyString,
+    reply: NonEmptyString,
+    /** The next reply is a hosted-wizard secret and clients must mask its input/echo. */
+    sensitive: Type.Optional(Type.Boolean()),
+    /** The hosted wizard will consume the next message as its current step answer. */
+    wizardInputPending: Type.Optional(Type.Boolean()),
+    action: Type.Union([
+      Type.Literal("none"),
+      // The user asked to talk to their agent; clients should move to their
+      // normal agent chat surface.
+      Type.Literal("open-agent"),
+      Type.Literal("exit"),
+    ]),
+    /** Optional localized-draft intent for an `open-agent` handoff. */
+    agentDraft: Type.Optional(Type.Literal("hatch")),
+    /** Destination agent for a specific `open-agent` handoff. */
+    agentId: Type.Optional(NonEmptyString),
+    needsApproval: Type.Optional(Type.Boolean()),
+    proposalId: Type.Optional(NonEmptyString),
+    question: Type.Optional(SystemAgentChatQuestionSchema),
+    presentation: Type.Optional(SystemAgentChatPresentationSchema),
+  },
+  {
+    additionalProperties: false,
+    // Keep QR state atomic on the wire: legacy top-level wizard fields would
+    // let clients render two competing prompts or navigate away mid-acknowledgement.
+    if: Type.Object({ presentation: Type.Unknown() }),
+    // oxlint-disable-next-line unicorn/no-thenable -- `then` is the JSON Schema conditional keyword.
+    then: Type.Object({
+      action: Type.Literal("none"),
+      wizardInputPending: Type.Optional(Type.Never()),
+      question: Type.Optional(Type.Never()),
+    }),
+  },
+);
 
 export const SystemAgentChatHistoryParamsSchema = closedObject({
   limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 500, default: 100 })),
@@ -349,11 +397,44 @@ export const SystemAgentSetupAuthStartParamsSchema = closedObject({
 
 export const SystemAgentSetupAuthStartResultSchema = WizardStartResultSchema;
 
-// Wire types derive directly from local schema consts so public d.ts graphs never
-// pull in the ProtocolSchemas registry.
+// Wire types stay backed by local schema consts so public d.ts graphs never pull in
+// the ProtocolSchemas registry. Narrow overlays preserve additive source contracts.
 export type SystemAgentChatParams = Static<typeof SystemAgentChatParamsSchema>;
-export type SystemAgentChatQuestion = Static<typeof SystemAgentChatQuestionSchema>;
-export type SystemAgentChatResult = Static<typeof SystemAgentChatResultSchema>;
+type SystemAgentChatAcknowledgementQuestion = Static<
+  typeof SystemAgentChatAcknowledgementQuestionSchema
+> & {
+  // Preserve source-compatible reads while the closed runtime schema still rejects these fields.
+  isOther?: never;
+  skipAction?: never;
+};
+export type SystemAgentChatQuestion =
+  | SystemAgentChatAcknowledgementQuestion
+  | Static<typeof SystemAgentChatChoiceQuestionSchema>;
+type SystemAgentChatPresentationWire = Static<typeof SystemAgentChatPresentationSchema>;
+export type SystemAgentChatPresentation = Omit<SystemAgentChatPresentationWire, "question"> & {
+  question: SystemAgentChatAcknowledgementQuestion;
+};
+type SystemAgentChatResultWire = Static<typeof SystemAgentChatResultSchema>;
+type SystemAgentChatResultWithoutPresentation = Omit<
+  SystemAgentChatResultWire,
+  "presentation" | "question"
+> & {
+  presentation?: never;
+  question?: SystemAgentChatQuestion;
+};
+type SystemAgentChatResultWithPresentation = Omit<
+  SystemAgentChatResultWire,
+  "action" | "presentation" | "question" | "wizardInputPending"
+> & {
+  action: "none";
+  presentation: SystemAgentChatPresentation;
+  question?: never;
+  wizardInputPending?: never;
+};
+/** The QR presentation bundle is atomic in both the runtime schema and public TS type. */
+export type SystemAgentChatResult =
+  | SystemAgentChatResultWithoutPresentation
+  | SystemAgentChatResultWithPresentation;
 export type SystemAgentChatHistoryParams = Static<typeof SystemAgentChatHistoryParamsSchema>;
 export type SystemAgentChatHistoryTurn = Static<typeof SystemAgentChatHistoryTurnSchema>;
 export type SystemAgentChatHistoryResult = Static<typeof SystemAgentChatHistoryResultSchema>;
