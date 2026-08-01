@@ -134,6 +134,100 @@ describe("createLmstudioEmbeddingProvider preload context length", () => {
     );
   });
 
+  it.each(["lmstudio", "lmstudio-spark"])(
+    "honors the preload opt-out for %s while retaining request-time service leases",
+    async (providerId) => {
+      const release = vi.fn();
+      const acquireLocalService = vi.fn(async () => ({ release }));
+      const { provider } = await createLmstudioEmbeddingProvider({
+        config: {
+          models: {
+            providers: {
+              [providerId]: {
+                baseUrl: "http://spark.local:1234/v1",
+                params: { preload: false },
+                localService: { command: "/usr/bin/lms-spark" },
+                models: [{ id: EMBEDDING_MODEL }],
+              },
+            },
+          },
+        } as unknown as OpenClawConfig,
+        provider: providerId,
+        model: `${providerId}/${EMBEDDING_MODEL}`,
+        fallback: "none",
+        acquireLocalService,
+      });
+
+      expect(ensureLmstudioModelLoadedMock).not.toHaveBeenCalled();
+      expect(acquireLocalService).not.toHaveBeenCalled();
+
+      await expect(provider.embedQuery("hello")).resolves.toEqual([1, 0]);
+
+      expect(acquireLocalService).toHaveBeenCalledOnce();
+      expect(acquireLocalService).toHaveBeenCalledWith(
+        expect.objectContaining({ providerId, baseUrl: "http://spark.local:1234/v1" }),
+        undefined,
+      );
+      expect(release).toHaveBeenCalledOnce();
+    },
+  );
+
+  it("uses the canonical preloaded model for embedding requests and memory identity", async () => {
+    const requestedVariant = `${EMBEDDING_MODEL}@q4_k_m`;
+    const result = await lmstudioMemoryEmbeddingProviderAdapter.create({
+      config: buildConfig({ model: { id: requestedVariant } }),
+      provider: "lmstudio",
+      model: `lmstudio/${requestedVariant}`,
+      fallback: "none",
+    });
+
+    expect(ensureLmstudioModelLoadedMock).toHaveBeenCalledWith(
+      expect.objectContaining({ modelKey: requestedVariant }),
+    );
+    expect(createRemoteEmbeddingProviderMock).toHaveBeenCalledWith(
+      expect.objectContaining({ client: expect.objectContaining({ model: EMBEDDING_MODEL }) }),
+    );
+    expect(result.provider?.model).toBe(EMBEDDING_MODEL);
+    expect(result.runtime?.cacheKeyData).toMatchObject({ model: EMBEDDING_MODEL });
+  });
+
+  it("retains the discovered canonical model when its preload subsequently fails", async () => {
+    const requestedVariant = `${EMBEDDING_MODEL}@q4_k_m`;
+    ensureLmstudioModelLoadedMock.mockRejectedValueOnce(
+      Object.assign(new Error("fixture preload rejected"), { resolvedModelKey: EMBEDDING_MODEL }),
+    );
+
+    const result = await lmstudioMemoryEmbeddingProviderAdapter.create({
+      config: buildConfig({ model: { id: requestedVariant } }),
+      provider: "lmstudio",
+      model: `lmstudio/${requestedVariant}`,
+      fallback: "none",
+    });
+
+    expect(createRemoteEmbeddingProviderMock).toHaveBeenCalledWith(
+      expect.objectContaining({ client: expect.objectContaining({ model: EMBEDDING_MODEL }) }),
+    );
+    expect(result.provider?.model).toBe(EMBEDDING_MODEL);
+    expect(result.runtime?.cacheKeyData).toMatchObject({ model: EMBEDDING_MODEL });
+  });
+
+  it("keeps the requested model when preload fails before discovering its identity", async () => {
+    const requestedVariant = `${EMBEDDING_MODEL}@q4_k_m`;
+    ensureLmstudioModelLoadedMock.mockRejectedValueOnce(new Error("fixture discovery unavailable"));
+
+    const { client } = await createLmstudioEmbeddingProvider({
+      config: buildConfig({ model: { id: requestedVariant } }),
+      provider: "lmstudio",
+      model: `lmstudio/${requestedVariant}`,
+      fallback: "none",
+    });
+
+    expect(client.model).toBe(requestedVariant);
+    expect(createRemoteEmbeddingProviderMock).toHaveBeenCalledWith(
+      expect.objectContaining({ client: expect.objectContaining({ model: requestedVariant }) }),
+    );
+  });
+
   it("leases the exact configured alias for preload and embedding requests", async () => {
     const release = vi.fn();
     const acquireLocalService = vi.fn(async (_target: unknown) => ({ release }));

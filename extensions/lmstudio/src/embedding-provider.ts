@@ -241,25 +241,35 @@ export async function createLmstudioEmbeddingProvider(
     }
   };
 
-  await withLocalServiceLease(undefined, async () => {
-    try {
-      await ensureLmstudioModelLoaded({
-        baseUrl,
-        apiKey,
-        headers: headerOverrides,
-        ssrfPolicy,
-        modelKey: model,
-        requestedContextLength,
-        timeoutMs: 120_000,
-      });
-    } catch (error) {
-      log.warn("lmstudio embeddings warmup failed; continuing without preload", {
-        baseUrl,
-        model,
-        error: formatErrorMessage(error),
-      });
-    }
-  });
+  // The provider-owned JIT opt-out applies to embeddings as well as chat.
+  if (providerConfig?.params?.preload !== false) {
+    await withLocalServiceLease(undefined, async () => {
+      try {
+        client.model = await ensureLmstudioModelLoaded({
+          baseUrl,
+          apiKey,
+          headers: headerOverrides,
+          ssrfPolicy,
+          modelKey: model,
+          requestedContextLength,
+          timeoutMs: 120_000,
+        });
+      } catch (error) {
+        // Discovery still identifies the wire model when the subsequent load fails.
+        if (error instanceof Error && "resolvedModelKey" in error) {
+          const resolvedModelKey = error.resolvedModelKey;
+          if (typeof resolvedModelKey === "string" && resolvedModelKey.trim()) {
+            client.model = resolvedModelKey.trim();
+          }
+        }
+        log.warn("lmstudio embeddings warmup failed; continuing without preload", {
+          baseUrl,
+          model,
+          error: formatErrorMessage(error),
+        });
+      }
+    });
+  }
 
   const remoteProvider = createRemoteEmbeddingProvider({
     id: LMSTUDIO_PROVIDER_ID,
