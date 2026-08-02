@@ -1,5 +1,6 @@
 /* @vitest-environment jsdom */
 
+import { MAX_TIMER_TIMEOUT_MS } from "@openclaw/normalization-core/number-coercion";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { GatewayRequestError } from "../../api/gateway.ts";
 import { waitForFast } from "../../test-helpers/wait-for.ts";
@@ -59,7 +60,7 @@ describe("custodian page QR presentation", () => {
   });
 
   it("retires the delivered QR image and action at its advertised deadline", async () => {
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    vi.useFakeTimers();
     const expiresAtMs = Date.now() + 60_000;
     const request = vi.fn().mockResolvedValue({
       sessionId: "control-ui-onboarding-00000000-0000-4000-8000-000000000001",
@@ -94,6 +95,24 @@ describe("custodian page QR presentation", () => {
     expect(onExpire).toHaveBeenCalledOnce();
     expect(expiry.expiresAtMs).toBeUndefined();
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("rearms a long QR expiry without retiring it at the timer limit", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-02T00:00:00Z"));
+    const onExpire = vi.fn();
+    const expiry = new CustodianQrExpiry();
+
+    expiry.schedule(Date.now() + MAX_TIMER_TIMEOUT_MS + 5_000, onExpire);
+    await vi.advanceTimersByTimeAsync(MAX_TIMER_TIMEOUT_MS);
+
+    expect(onExpire).not.toHaveBeenCalled();
+    expect(expiry.expiresAtMs).toBe(Date.now() + 5_000);
+    expect(vi.getTimerCount()).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(onExpire).toHaveBeenCalledOnce();
+    expect(expiry.expiresAtMs).toBeUndefined();
   });
 
   it.each([

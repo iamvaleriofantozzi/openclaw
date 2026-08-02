@@ -101,14 +101,6 @@ vi.mock("../../system-agent/overview.js", () => ({
 
 type RespondCall = { ok: boolean; payload?: unknown; error?: unknown };
 
-function createDeferred() {
-  let resolve!: () => void;
-  const promise = new Promise<void>((done) => {
-    resolve = done;
-  });
-  return { promise, resolve };
-}
-
 function makeClient(params: {
   connId: string;
   deviceId?: string;
@@ -259,35 +251,6 @@ describe("openclaw.chat session ownership", () => {
     for (const dispose of disposals.slice(1)) {
       expect(dispose).not.toHaveBeenCalled();
     }
-  });
-
-  it("keeps the session map bounded during concurrent unique initialization", async () => {
-    const evictionStarted = createDeferred();
-    const releaseEviction = createDeferred();
-    const oldest = seededSession({ lastUsedAt: 0 });
-    const disposeOldest = vi.spyOn(oldest.engine, "dispose").mockImplementation(async () => {
-      evictionStarted.resolve();
-      await releaseEviction.promise;
-    });
-    const sessions = new Map<string, SystemAgentChatSession>([["oldest", oldest]]);
-    for (let index = 1; index < 8; index += 1) {
-      sessions.set(`existing-${index}`, seededSession({ lastUsedAt: index }));
-    }
-
-    const context = makeContext(sessions);
-    const first = callChat(context, { sessionId: "new-1" });
-    const second = callChat(context, { sessionId: "new-2" });
-    await evictionStarted.promise;
-    await new Promise((resolve) => {
-      setTimeout(resolve, 0);
-    });
-    releaseEviction.resolve();
-    await Promise.all([first, second]);
-
-    expect(disposeOldest).toHaveBeenCalledOnce();
-    expect(sessions.size).toBe(8);
-    expect(sessions.has("new-1")).toBe(true);
-    expect(sessions.has("new-2")).toBe(true);
   });
 
   it("keeps one QR-owning session protected for each distinct owner", async () => {

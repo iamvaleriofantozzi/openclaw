@@ -311,7 +311,6 @@ describe("OpenClaw chat result protocol", () => {
         question,
       },
     } satisfies SystemAgentChatResult;
-    expectTypeOf(validPresentation).toMatchTypeOf<SystemAgentChatResult>();
 
     type NavigationQrResult = Omit<typeof validPresentation, "action"> & {
       action: "open-agent";

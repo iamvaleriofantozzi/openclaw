@@ -4,6 +4,7 @@ import {
   QR_PNG_DATA_URL_PREFIX,
 } from "@openclaw/gateway-protocol/schema";
 import { sanitizeInlineImageDataUrl } from "@openclaw/media-core/inline-image-data-url";
+import { MAX_TIMER_TIMEOUT_MS } from "@openclaw/normalization-core/number-coercion";
 import { parseCustodianQuestion, type CustodianStructuredQuestion } from "./structured-question.ts";
 
 function parseCustodianQrPngDataUrl(value: unknown): string | undefined {
@@ -60,17 +61,19 @@ export class CustodianQrExpiry {
 
   schedule(expiresAtMs: number, onExpire: () => void): void {
     this.clear();
-    // An expired credential must be retired in this turn; throttled timers could
-    // otherwise leave its image and acknowledgement available past the deadline.
-    if (expiresAtMs <= Date.now()) {
-      onExpire();
-      return;
-    }
     this.expiresAtMs = expiresAtMs;
-    this.timer = setTimeout(() => {
-      this.timer = undefined;
-      this.expiresAtMs = undefined;
-      onExpire();
-    }, expiresAtMs - Date.now());
+    // Rearm long deadlines in timer-safe chunks; passing the full wire timestamp
+    // delta can overflow setTimeout and retire a still-valid credential immediately.
+    const waitForExpiry = () => {
+      const remainingMs = Math.max(0, expiresAtMs - Date.now());
+      if (remainingMs === 0) {
+        this.timer = undefined;
+        this.expiresAtMs = undefined;
+        onExpire();
+        return;
+      }
+      this.timer = setTimeout(waitForExpiry, Math.min(remainingMs, MAX_TIMER_TIMEOUT_MS));
+    };
+    waitForExpiry();
   }
 }
