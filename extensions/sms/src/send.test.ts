@@ -1,6 +1,7 @@
 // Sms tests cover send plugin behavior.
 import { isChannelPartialDeliveryError } from "openclaw/plugin-sdk/channel-inbound";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { sendSmsViaTwilio as sendSmsViaTwilioType } from "./twilio.js";
 import type { ResolvedSmsAccount } from "./types.js";
 
 type SendModule = typeof import("./send.js");
@@ -14,7 +15,7 @@ let toSmsPlainText: SendModule["toSmsPlainText"];
 let resolveSmsAccount: (typeof import("./accounts.js"))["resolveSmsAccount"];
 
 const sendSmsViaTwilio = vi.hoisted(() =>
-  vi.fn(async ({ to, onPlatformSendDispatch }) => {
+  vi.fn<typeof sendSmsViaTwilioType>(async ({ to, onPlatformSendDispatch }) => {
     await onPlatformSendDispatch?.();
     return { sid: `SM-${to}`, to };
   }),
@@ -22,6 +23,8 @@ const sendSmsViaTwilio = vi.hoisted(() =>
 const prepareHostedSmsMediaUrl = vi.hoisted(() =>
   vi.fn(async () => "https://gateway.example.com/webhooks/sms/media/abc?token=token"),
 );
+const recordInitialSmsDeliveryResult = vi.hoisted(() => vi.fn(async () => null));
+const deliveryWarn = vi.hoisted(() => vi.fn());
 
 beforeEach(async () => {
   vi.resetModules();
@@ -34,12 +37,25 @@ beforeEach(async () => {
   prepareHostedSmsMediaUrl.mockResolvedValue(
     "https://gateway.example.com/webhooks/sms/media/abc?token=token",
   );
+  recordInitialSmsDeliveryResult.mockReset();
+  recordInitialSmsDeliveryResult.mockResolvedValue(null);
+  deliveryWarn.mockClear();
   vi.doMock("./twilio.js", () => ({
     sendSmsViaTwilio,
     TWILIO_MESSAGE_BODY_MAX_LENGTH: 1600,
   }));
   vi.doMock("./media.js", () => ({
     prepareHostedSmsMediaUrl,
+  }));
+  vi.doMock("./delivery-observations.js", () => ({
+    recordInitialSmsDeliveryResult,
+  }));
+  vi.doMock("./runtime.js", () => ({
+    getSmsRuntime: () => ({
+      logging: {
+        getChildLogger: () => ({ warn: deliveryWarn }),
+      },
+    }),
   }));
   ({ prepareSmsMediaAttempt, sendPreparedSmsMediaAttempt, sendSmsTextChunks, toSmsPlainText } =
     await import("./send.js"));
@@ -49,6 +65,8 @@ beforeEach(async () => {
 afterEach(() => {
   vi.doUnmock("./twilio.js");
   vi.doUnmock("./media.js");
+  vi.doUnmock("./delivery-observations.js");
+  vi.doUnmock("./runtime.js");
   delete process.env.TWILIO_ACCOUNT_SID;
   delete process.env.TWILIO_AUTH_TOKEN;
   delete process.env.TWILIO_PHONE_NUMBER;
@@ -105,6 +123,116 @@ describe("sendSmsTextChunks", () => {
     expect(onPlatformSendDispatch).toHaveBeenCalledOnce();
   });
 
+  it.each(["accepted", "scheduled", "queued"])(
+    "persists the initial Twilio %s response after sending",
+    async (status) => {
+      const account = createAccount(1500);
+      sendSmsViaTwilio.mockResolvedValueOnce({
+        sid: `SM-${status}`,
+        to: "+15551234567",
+        status,
+      });
+
+      await expect(
+        sendSmsTextChunks({
+          account,
+          to: "+15551234567",
+          text: "hello",
+        }),
+      ).resolves.toEqual([
+        {
+          sid: `SM-${status}`,
+          to: "+15551234567",
+          status,
+        },
+      ]);
+
+      expect(recordInitialSmsDeliveryResult).toHaveBeenCalledWith({
+        account,
+        result: {
+          sid: `SM-${status}`,
+          to: "+15551234567",
+          status,
+        },
+      });
+    },
+  );
+
+  it("logs initial-state persistence failure without resending or failing the send", async () => {
+    sendSmsViaTwilio.mockResolvedValueOnce({
+      sid: "SM-queued",
+      to: "+15551234567",
+      status: "queued",
+    });
+    recordInitialSmsDeliveryResult.mockRejectedValueOnce(new Error("sqlite unavailable"));
+
+    await expect(
+      sendSmsTextChunks({
+        account: createAccount(1500),
+        to: "+15551234567",
+        text: "hello",
+      }),
+    ).resolves.toEqual([
+      {
+        sid: "SM-queued",
+        to: "+15551234567",
+        status: "queued",
+      },
+    ]);
+
+    expect(sendSmsViaTwilio).toHaveBeenCalledOnce();
+    expect(recordInitialSmsDeliveryResult).toHaveBeenCalledOnce();
+    expect(deliveryWarn).toHaveBeenCalledWith(
+      "SMS delivery initial state could not be persisted.",
+      {
+        messageSid: "SM-queued",
+        errorType: "Error",
+      },
+    );
+  });
+
+  it("records chunk results independently after one observation write fails", async () => {
+    sendSmsViaTwilio
+      .mockResolvedValueOnce({
+        sid: "SM-1",
+        to: "+15551234567",
+        status: "queued",
+      })
+      .mockResolvedValueOnce({
+        sid: "SM-2",
+        to: "+15551234567",
+        status: "queued",
+      });
+    recordInitialSmsDeliveryResult
+      .mockRejectedValueOnce(new Error("first write failed"))
+      .mockResolvedValueOnce(null);
+
+    await sendSmsTextChunks({
+      account: createAccount(5),
+      to: "+15551234567",
+      text: "alpha beta",
+    });
+
+    expect(sendSmsViaTwilio).toHaveBeenCalledTimes(2);
+    expect(recordInitialSmsDeliveryResult).toHaveBeenCalledTimes(2);
+    expect(deliveryWarn).toHaveBeenCalledOnce();
+  });
+
+  it("does not swallow provider send failures", async () => {
+    sendSmsViaTwilio.mockRejectedValueOnce(new Error("Twilio unavailable"));
+
+    await expect(
+      sendSmsTextChunks({
+        account: createAccount(1500),
+        to: "+15551234567",
+        text: "hello",
+      }),
+    ).rejects.toThrow("Twilio unavailable");
+
+    expect(sendSmsViaTwilio).toHaveBeenCalledOnce();
+    expect(recordInitialSmsDeliveryResult).not.toHaveBeenCalled();
+  });
+
   it("splits long SMS text before sending to Twilio", async () => {
     await sendSmsTextChunks({
       account: createAccount(5),
@@ -113,7 +241,12 @@ describe("sendSmsTextChunks", () => {
     });
 
     expect(sendSmsViaTwilio).toHaveBeenCalledTimes(2);
-    const texts = sendSmsViaTwilio.mock.calls.map(([call]) => call.text);
+    const texts = sendSmsViaTwilio.mock.calls.map(([call]) => {
+      if (call.text === undefined) {
+        throw new Error("test invariant: expected a Twilio text send");
+      }
+      return call.text;
+    });
     expect(texts).toEqual(["alpha", " beta"]);
     expect(texts.join("")).toBe("alpha beta");
   });
@@ -142,7 +275,12 @@ describe("sendSmsTextChunks", () => {
       text: `${"x".repeat(50)} ${header} ok`,
     });
 
-    const texts = sendSmsViaTwilio.mock.calls.map(([call]) => call.text);
+    const texts = sendSmsViaTwilio.mock.calls.map(([call]) => {
+      if (call.text === undefined) {
+        throw new Error("test invariant: expected a Twilio text send");
+      }
+      return call.text;
+    });
     expect(texts).toContain(`[assistant-authored transcript] ${header} ok`);
     expect(texts.every((text) => text.length <= 60)).toBe(true);
   });
@@ -306,6 +444,14 @@ describe("sendSmsMedia", () => {
       to: "+15551234567",
       text: "x",
       onPlatformSendDispatch: expect.any(Function),
+    });
+    expect(recordInitialSmsDeliveryResult).toHaveBeenNthCalledWith(1, {
+      account: createAccount(5000),
+      result: { sid: "MM-first", to: "+15551234567" },
+    });
+    expect(recordInitialSmsDeliveryResult).toHaveBeenNthCalledWith(2, {
+      account: createAccount(5000),
+      result: { sid: "SM-second", to: "+15551234567" },
     });
   });
 
