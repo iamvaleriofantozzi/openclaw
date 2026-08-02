@@ -60,14 +60,17 @@ export class CustodianQrExpiry {
 
   schedule(expiresAtMs: number, onExpire: () => void): void {
     this.clear();
+    // An expired credential must be retired in this turn; throttled timers could
+    // otherwise leave its image and acknowledgement available past the deadline.
+    if (expiresAtMs <= Date.now()) {
+      onExpire();
+      return;
+    }
     this.expiresAtMs = expiresAtMs;
-    this.timer = setTimeout(
-      () => {
-        this.timer = undefined;
-        this.expiresAtMs = undefined;
-        onExpire();
-      },
-      Math.max(0, expiresAtMs - Date.now()),
-    );
+    this.timer = setTimeout(() => {
+      this.timer = undefined;
+      this.expiresAtMs = undefined;
+      onExpire();
+    }, expiresAtMs - Date.now());
   }
 }

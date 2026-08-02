@@ -88,6 +88,36 @@ struct SystemAgentChatQuestionTests {
     }
 
     @Test
+    func `valid QR presentation decodes and round trips`() throws {
+        let json =
+            """
+            {
+              "sessionId": "test-session",
+              "reply": "Scan the code.",
+              "action": "none",
+              "presentation": \(Self.qrPresentationJSON)
+            }
+            """
+        let decoded = try JSONDecoder().decode(SystemAgentChatResult.self, from: Data(json.utf8))
+        let presentation = try #require(decoded.presentation)
+
+        #expect(presentation.kind == "qr")
+        #expect(presentation.dataurl == "data:image/png;base64,AAAA")
+        #expect(presentation.expiresatms == 1)
+        #expect(presentation.wizardinputpending)
+        #expect(presentation.question.id == "setup-qr")
+        #expect(presentation.question.options.count == 1)
+        #expect(presentation.question.options[0].label == "Continue")
+        #expect(!presentation.question.allowskip)
+
+        let roundTripped = try JSONDecoder().decode(
+            SystemAgentChatResult.self,
+            from: JSONEncoder().encode(decoded))
+        #expect(roundTripped.presentation?.dataurl == presentation.dataurl)
+        #expect(roundTripped.presentation?.question.options[0].label == "Continue")
+    }
+
+    @Test
     func `QR presentation rejects competing top-level state`() {
         let invalidResults = [
             """

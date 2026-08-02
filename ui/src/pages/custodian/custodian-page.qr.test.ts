@@ -9,6 +9,7 @@ import {
   createCustodianQrPresentation,
   mountPage,
 } from "./custodian-page.test-harness.ts";
+import { CustodianQrExpiry } from "./custodian-qr.ts";
 
 describe("custodian page QR presentation", () => {
   beforeEach(() => {
@@ -80,6 +81,19 @@ describe("custodian page QR presentation", () => {
     expect(page.querySelector("openclaw-option-card")).toBeNull();
     expect(page.textContent).toContain("This setup QR code expired.");
     expect(page.store.messages.some((message) => message.qrDataUrl !== undefined)).toBe(false);
+  });
+
+  it("retires an already-expired QR synchronously", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-02T00:00:00Z"));
+    const onExpire = vi.fn();
+    const expiry = new CustodianQrExpiry();
+
+    expiry.schedule(Date.now(), onExpire);
+
+    expect(onExpire).toHaveBeenCalledOnce();
+    expect(expiry.expiresAtMs).toBeUndefined();
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it.each([

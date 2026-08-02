@@ -1,5 +1,5 @@
 import { Value } from "typebox/value";
-import { describe, expect, it } from "vitest";
+import { describe, expect, expectTypeOf, it } from "vitest";
 import {
   validateSystemAgentChatParams,
   validateSystemAgentChatHistoryParams,
@@ -299,8 +299,7 @@ describe("OpenClaw chat result protocol", () => {
   });
 
   it("models the atomic QR bundle in the public TypeScript type", () => {
-    const accept = (_value: SystemAgentChatResult): void => {};
-    accept({
+    const validPresentation = {
       sessionId: "setup-session",
       reply: "Scan this QR code, then continue.",
       action: "none",
@@ -311,35 +310,22 @@ describe("OpenClaw chat result protocol", () => {
         expiresAtMs: 1_800_000,
         question,
       },
-    });
-    const navigationPresentation = {
-      sessionId: "setup-session",
-      reply: "Scan it.",
-      action: "open-agent",
-      presentation: {
-        kind: "qr",
-        wizardInputPending: true,
-        dataUrl: QR_DATA_URL,
-        expiresAtMs: 1_800_000,
-        question,
-      },
+    } satisfies SystemAgentChatResult;
+    expectTypeOf(validPresentation).toMatchTypeOf<SystemAgentChatResult>();
+
+    type NavigationQrResult = Omit<typeof validPresentation, "action"> & {
+      action: "open-agent";
     };
-    // @ts-expect-error QR presentation cannot accompany a navigation action.
-    accept(navigationPresentation);
-    const multiOptionPresentation = {
-      sessionId: "setup-session",
-      reply: "Scan it.",
-      action: "none",
-      presentation: {
-        kind: "qr",
-        wizardInputPending: true,
-        dataUrl: QR_DATA_URL,
-        expiresAtMs: 1_800_000,
-        question: { ...question, options: [{ label: "Continue" }, { label: "Cancel" }] },
-      },
+    expectTypeOf<NavigationQrResult>().not.toMatchTypeOf<SystemAgentChatResult>();
+
+    type MultiOptionQrResult = Omit<typeof validPresentation, "presentation"> & {
+      presentation: Omit<SystemAgentChatPresentation, "question"> & {
+        question: Omit<SystemAgentChatPresentation["question"], "options"> & {
+          options: [{ label: string }, { label: string }];
+        };
+      };
     };
-    // @ts-expect-error QR acknowledgement is exactly one option.
-    accept(multiOptionPresentation);
+    expectTypeOf<MultiOptionQrResult>().not.toMatchTypeOf<SystemAgentChatResult>();
   });
 });
 
