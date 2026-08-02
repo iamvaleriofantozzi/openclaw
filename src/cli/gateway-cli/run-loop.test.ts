@@ -133,6 +133,7 @@ const markRestartAbortedMainSessions = vi.fn(async (_params: unknown) => ({
   skipped: 0,
 }));
 const waitForActiveEmbeddedRuns = vi.fn(async (_timeoutMs?: number) => ({ drained: true }));
+const waitForRetiredSystemAgentMutationSettlement = vi.fn(async () => {});
 const DRAIN_TIMEOUT_LOG = "drain timeout reached; proceeding with restart";
 const ACTIVE_RUN_DRAIN_TIMEOUT_LOG =
   "active embedded run drain timeout reached; aborting active run(s) before restart";
@@ -233,6 +234,10 @@ vi.mock("../../infra/agent-events.js", () => ({
 
 vi.mock("../../gateway/process-instance.js", () => ({
   rotateGatewayProcessInstanceId: () => rotateGatewayProcessInstanceId(),
+}));
+
+vi.mock("../../gateway/server-methods/system-agent-execution-lifecycle.js", () => ({
+  waitForRetiredSystemAgentMutationSettlement: () => waitForRetiredSystemAgentMutationSettlement(),
 }));
 
 vi.mock("../../config/runtime-snapshot.js", () => ({
@@ -1210,6 +1215,43 @@ describe("runGatewayLoop", () => {
         reason: "gateway stopping",
         restartExpectedMs: null,
       });
+    });
+  });
+
+  it("waits for retired system-agent mutations before starting the replacement Gateway", async () => {
+    vi.clearAllMocks();
+    restartGatewayProcessWithFreshPid.mockReturnValue({ mode: "disabled" });
+    let releaseSettlement: (() => void) | undefined;
+    const settlement = new Promise<void>((resolve) => {
+      releaseSettlement = resolve;
+    });
+    waitForRetiredSystemAgentMutationSettlement.mockImplementationOnce(async () => {
+      await settlement;
+    });
+
+    await withIsolatedSignals(async ({ captureSignal }) => {
+      const { start, exited } = await createSignaledLoopHarness();
+      const sigusr1 = captureSignal("SIGUSR1");
+      const sigterm = captureSignal("SIGTERM");
+
+      sigusr1();
+      await waitForLoopCondition(
+        () => waitForRetiredSystemAgentMutationSettlement.mock.calls.length === 1,
+        "expected restart to wait for retired system-agent mutations",
+      );
+      expect(start).toHaveBeenCalledOnce();
+
+      releaseSettlement?.();
+      await waitForLoopCondition(
+        () => start.mock.calls.length === 2,
+        "expected replacement Gateway to start after retired mutations settled",
+      );
+      expect(
+        waitForRetiredSystemAgentMutationSettlement.mock.invocationCallOrder[0] ?? Infinity,
+      ).toBeLessThan(start.mock.invocationCallOrder[1] ?? 0);
+
+      sigterm();
+      await expect(exited).resolves.toBe(0);
     });
   });
 

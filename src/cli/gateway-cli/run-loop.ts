@@ -234,6 +234,10 @@ export async function runGatewayLoop(params: {
     return spawned;
   };
   const handleRestartAfterServerClose = async () => {
+    // Keep the process lock until every non-cancellable setup write from the
+    // retired Gateway settles. The existing restart watchdog exits to the
+    // supervisor if this fence outlives the restart budget.
+    await eagerLifecycleRuntime.waitForRetiredSystemAgentMutationSettlement();
     await releaseLockIfHeld();
     const {
       detectGatewayRespawnSupervisor,

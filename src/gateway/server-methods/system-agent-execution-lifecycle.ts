@@ -16,7 +16,11 @@ const activeSystemAgentMutationSettlements = new WeakMap<
 >();
 let retiredSystemAgentMutationSettlement: Promise<void> = Promise.resolve();
 
-async function waitForRetiredSystemAgentMutationSettlement(): Promise<void> {
+export async function waitForRetiredSystemAgentMutationSettlement(): Promise<void> {
+  await retiredSystemAgentMutationSettlement;
+}
+
+async function waitForRetiredSystemAgentMutationSettlementForRpc(): Promise<void> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_resolve, reject) => {
     timer = setTimeout(() => {
@@ -29,7 +33,7 @@ async function waitForRetiredSystemAgentMutationSettlement(): Promise<void> {
     timer.unref?.();
   });
   try {
-    await Promise.race([retiredSystemAgentMutationSettlement, timeout]);
+    await Promise.race([waitForRetiredSystemAgentMutationSettlement(), timeout]);
   } finally {
     if (timer) {
       clearTimeout(timer);
@@ -78,7 +82,7 @@ export async function runSystemAgentGatewayTask<T>(
 ): Promise<T> {
   // A persistent writer that crossed its commit boundary cannot be cancelled.
   // Preserve the cross-generation fence until every retired writer has settled.
-  await waitForRetiredSystemAgentMutationSettlement();
+  await waitForRetiredSystemAgentMutationSettlementForRpc();
   assertSystemAgentGatewayExecutionActive(sessions);
   const queue = getSystemAgentGatewayExecutionQueue(sessions);
   // Track every accepted RPC as active, never queued: restart draining snapshots
