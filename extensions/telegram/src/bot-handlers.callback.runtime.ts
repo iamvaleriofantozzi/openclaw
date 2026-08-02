@@ -78,7 +78,9 @@ export function registerTelegramCallbackQueryHandler(
       }
       return;
     }
-    const data = (callback.data ?? "").trim();
+    // Callback bytes are opaque; only owner-controlled routing uses trimmed data.
+    const rawData = callback.data ?? "";
+    const data = rawData.trim();
     const typedQuestionCallback = parseTelegramQuestionCallbackData(data);
     const earlyAnswerPromise = getTelegramCallbackQueryAnswerPromise(ctx);
     if (earlyAnswerPromise) {
@@ -94,15 +96,21 @@ export function registerTelegramCallbackQueryHandler(
 
     try {
       const callbackMessage = callback.message;
-      if (!data || !callbackMessage) {
+      if (!rawData || !callbackMessage) {
         return;
       }
       const chatId = callbackMessage.chat.id;
       const isGroup =
         callbackMessage.chat.type === "group" || callbackMessage.chat.type === "supergroup";
       const nativeCallbackCommand = parseTelegramNativeCommandCallbackData(data);
-      const opaqueCallbackData = parseTelegramOpaqueCallbackData(data);
-      const genericCallbackText = data.startsWith("/") ? data : `callback_data: ${data}`;
+      // Owner-minted envelope checksums cover exact payload bytes, including whitespace.
+      const opaqueCallbackData =
+        parseTelegramOpaqueCallbackData(rawData) ??
+        (rawData === data ? null : parseTelegramOpaqueCallbackData(data));
+      // The downstream message context trims text, so quote edge whitespace reversibly.
+      const genericCallbackText = data.startsWith("/")
+        ? data
+        : `callback_data: ${rawData === data ? rawData : JSON.stringify(rawData)}`;
       const callbackCommandText =
         nativeCallbackCommand ?? (opaqueCallbackData ? "" : genericCallbackText);
       const hasReservedApprovalPrefix = hasTelegramApprovalCallbackPrefix(data);
@@ -232,7 +240,7 @@ export function registerTelegramCallbackQueryHandler(
           ctx,
           callbackMessage,
           data,
-          pluginCallbackData: opaqueCallbackData ?? data,
+          pluginCallbackData: opaqueCallbackData ?? rawData,
           callbackConversationId,
           callbackThreadId,
           senderId,

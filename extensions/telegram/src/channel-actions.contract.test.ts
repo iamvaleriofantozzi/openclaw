@@ -127,6 +127,61 @@ describe("telegram actions contract", () => {
     expect(properties).toHaveProperty("location");
   });
 
+  it("advertises strict native button rows for configured cross-channel sends", () => {
+    const discovery = telegramPlugin.actions?.describeMessageTool?.({
+      cfg: {
+        channels: { telegram: { botToken: "test-token-placeholder" } },
+      } as OpenClawConfig,
+    });
+    const contributions = Array.isArray(discovery?.schema) ? discovery.schema : [];
+    const contribution = contributions.find((entry) => "buttons" in entry.properties);
+
+    expect(contribution?.visibility).toBe("all-configured");
+    expect(contribution?.properties.buttons).toMatchObject({
+      type: "array",
+      items: {
+        type: "array",
+        minItems: 1,
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["text", "callback_data"],
+          properties: {
+            text: { type: "string", minLength: 1 },
+            callback_data: { type: "string", minLength: 1, maxLength: 64 },
+            style: { type: "string", enum: ["danger", "success", "primary"] },
+          },
+        },
+      },
+    });
+    expect(contributions.at(-1)).toBe(contribution);
+  });
+
+  it("scopes native button schemas to the selected account's inline-button capability", () => {
+    const cfg = {
+      channels: {
+        telegram: {
+          botToken: "default-token-placeholder",
+          capabilities: { inlineButtons: "off" },
+          accounts: {
+            interactive: {
+              botToken: "interactive-token-placeholder",
+              capabilities: { inlineButtons: "all" },
+            },
+          },
+        },
+      },
+    } as OpenClawConfig;
+    const buttonSchemaFor = (accountId: string) => {
+      const discovery = telegramPlugin.actions?.describeMessageTool?.({ cfg, accountId });
+      const contributions = Array.isArray(discovery?.schema) ? discovery.schema : [];
+      return contributions.find((entry) => "buttons" in entry.properties);
+    };
+
+    expect(buttonSchemaFor("default")).toBeUndefined();
+    expect(buttonSchemaFor("interactive")?.visibility).toBe("all-configured");
+  });
+
   it("does not advertise inline buttons for non-empty legacy Telegram capabilities without inlineButtons", () => {
     const capabilities = telegramPlugin.agentPrompt?.messageToolCapabilities?.({
       cfg: {
@@ -285,6 +340,28 @@ describe("telegram actions contract", () => {
       presentation,
       channelData: { telegram: { quoteText: "snake case quote" } },
     });
+  });
+
+  it.each([
+    { name: "native rows", buttons: [[{ text: "Native", callback_data: "native" }]] },
+    { name: "explicit keyboard clearing", buttons: [] },
+  ])("keeps $name on the Telegram-owned action path", async ({ buttons }) => {
+    const presentation = {
+      blocks: [{ type: "buttons" as const, buttons: [{ label: "Portable", value: "portable" }] }],
+    };
+
+    await expect(
+      telegramPlugin.actions?.prepareSendPayload?.({
+        ctx: {
+          channel: "telegram",
+          action: "send",
+          cfg: {} as OpenClawConfig,
+          params: { buttons },
+        },
+        to: "123456",
+        payload: { text: "Choose", presentation },
+      }),
+    ).resolves.toBeNull();
   });
 
   it("routes video-note and location hints through durable core delivery", async () => {

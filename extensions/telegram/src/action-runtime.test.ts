@@ -1899,6 +1899,54 @@ describe("handleTelegramAction", () => {
   });
 
   it.each([
+    {
+      name: "native rows",
+      buttons: [[{ text: "  Native  ", callback_data: " native ", style: "danger" }]],
+    },
+    {
+      name: "JSON-encoded rows",
+      buttons: JSON.stringify([
+        [{ text: "  Native  ", callback_data: " native ", style: "danger" }],
+      ]),
+    },
+  ])("edits reply markup with explicit $name", async ({ buttons }) => {
+    await handleTelegramAction(
+      {
+        action: "editMessage",
+        chatId: "123456",
+        messageId: 321,
+        buttons,
+        presentation: {
+          blocks: [{ type: "buttons", buttons: [{ label: "Portable", value: "portable" }] }],
+        },
+      },
+      telegramConfig({ capabilities: { inlineButtons: "all" } }),
+    );
+
+    expect(editMessageTelegram).not.toHaveBeenCalled();
+    const call = mockCall(editMessageReplyMarkupTelegram, 0, "native reply markup edit");
+    expect(call[2]).toEqual([[{ text: "Native", callback_data: " native ", style: "danger" }]]);
+  });
+
+  it("clears an existing keyboard when editMessage receives explicit empty buttons", async () => {
+    await handleTelegramAction(
+      {
+        action: "editMessage",
+        chatId: "123456",
+        messageId: 321,
+        buttons: [],
+        presentation: {
+          blocks: [{ type: "buttons", buttons: [{ label: "Portable", value: "portable" }] }],
+        },
+      },
+      telegramConfig({ capabilities: { inlineButtons: "all" } }),
+    );
+
+    const call = mockCall(editMessageReplyMarkupTelegram, 0, "native keyboard clearing");
+    expect(call[2]).toEqual([]);
+  });
+
+  it.each([
     { description: "non-empty", caption: "Updated caption", richMessages: false },
     { description: "empty", caption: "", richMessages: false },
     { description: "non-empty rich", caption: "Updated caption", richMessages: true },
@@ -2255,6 +2303,76 @@ describe("handleTelegramAction", () => {
     expect(requireRecord(call[2], "empty legacy capabilities options").buttons).toEqual([
       [{ text: "Ok", callback_data: "cmd:ok" }],
     ]);
+  });
+
+  it.each([
+    {
+      name: "native rows",
+      buttons: [[{ text: "  Native  ", callback_data: " plugin:opaque value ", style: "primary" }]],
+    },
+    {
+      name: "JSON-encoded rows",
+      buttons: JSON.stringify([
+        [{ text: "  Native  ", callback_data: " plugin:opaque value ", style: "primary" }],
+      ]),
+    },
+  ])("sends explicit $name ahead of interactive and presentation buttons", async ({ buttons }) => {
+    await handleTelegramAction(
+      {
+        action: "sendMessage",
+        to: "123456",
+        content: "Choose",
+        buttons,
+        interactive: {
+          blocks: [{ type: "buttons", buttons: [{ label: "Legacy", value: "legacy" }] }],
+        },
+        presentation: {
+          blocks: [{ type: "buttons", buttons: [{ label: "Portable", value: "portable" }] }],
+        },
+      },
+      telegramConfig({ capabilities: { inlineButtons: "all" } }),
+    );
+
+    const call = mockCall(sendMessageTelegram, 0, "native inline keyboard");
+    expect(requireRecord(call[2], "native inline keyboard options").buttons).toEqual([
+      [
+        {
+          text: "Native",
+          callback_data: " plugin:opaque value ",
+          style: "primary",
+        },
+      ],
+    ]);
+  });
+
+  it("rejects malformed explicit buttons before durable delivery", async () => {
+    await expect(
+      handleTelegramAction(
+        {
+          action: "sendMessage",
+          to: "123456",
+          content: "Choose",
+          buttons: JSON.stringify([[{ text: "Native", callback_data: `${"😀".repeat(16)}x` }]]),
+        },
+        telegramConfig({ capabilities: { inlineButtons: "all" } }),
+      ),
+    ).rejects.toThrow(/at most 64 UTF-8 bytes/);
+    expect(sendDurableMessageBatch).not.toHaveBeenCalled();
+  });
+
+  it("rejects runtime-control impersonation before durable delivery", async () => {
+    await expect(
+      handleTelegramAction(
+        {
+          action: "sendMessage",
+          to: "123456",
+          content: "Choose",
+          buttons: [[{ text: "Approve", callback_data: " tga1:e:o:request " }]],
+        },
+        telegramConfig({ capabilities: { inlineButtons: "all" } }),
+      ),
+    ).rejects.toThrow(/reserved Telegram runtime namespace/);
+    expect(sendDurableMessageBatch).not.toHaveBeenCalled();
   });
 
   it("uses interactive button labels as fallback text when message text is omitted", async () => {

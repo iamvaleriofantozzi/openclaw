@@ -2,7 +2,11 @@
 import { buildApprovalResolutionRef } from "openclaw/plugin-sdk/approval-reference-runtime";
 import { describe, expect, it } from "vitest";
 import { parseTelegramApprovalCallbackData } from "./approval-callback-data.js";
-import { buildTelegramPresentationButtons, resolveTelegramInlineButtons } from "./button-types.js";
+import {
+  buildTelegramPresentationButtons,
+  parseTelegramInlineButtons,
+  resolveTelegramInlineButtons,
+} from "./button-types.js";
 import { describeTelegramInteractiveButtonBehavior } from "./button-types.test-helpers.js";
 import {
   buildTelegramOpaqueCallbackData,
@@ -10,6 +14,174 @@ import {
 } from "./native-command-callback-data.js";
 
 describeTelegramInteractiveButtonBehavior();
+
+describe("parseTelegramInlineButtons", () => {
+  const callbackData = "😀".repeat(16);
+  const nativeButtons = [[{ text: "  Native  ", callback_data: callbackData, style: "primary" }]];
+
+  it.each([
+    { name: "native rows", value: nativeButtons },
+    { name: "JSON-encoded rows", value: JSON.stringify(nativeButtons) },
+  ])("parses $name and validates the UTF-8 callback boundary", ({ value }) => {
+    expect(parseTelegramInlineButtons(value)).toEqual([
+      [{ text: "Native", callback_data: callbackData, style: "primary" }],
+    ]);
+  });
+
+  it("strips private assistant scaffolding from visible native button labels", () => {
+    expect(
+      parseTelegramInlineButtons([
+        [
+          { text: "<think>private reasoning</think>Approve", callback_data: "approve" },
+          {
+            text: "<relevant-memories>private context</relevant-memories>Decline",
+            callback_data: "decline",
+          },
+          {
+            text: "<<<BEGIN_OPENCLAW_INTERNAL_CONTEXT>>>private runtime context<<<END_OPENCLAW_INTERNAL_CONTEXT>>>Review",
+            callback_data: "review",
+          },
+        ],
+      ]),
+    ).toEqual([
+      [
+        { text: "Approve", callback_data: "approve" },
+        { text: "Decline", callback_data: "decline" },
+        { text: "Review", callback_data: "review" },
+      ],
+    ]);
+  });
+
+  it("preserves opaque callback bytes without trimming or adding typed-action envelopes", () => {
+    const whitespaceBoundaryCallback = ` ${"😀".repeat(15)}ab `;
+    expect(
+      parseTelegramInlineButtons([
+        [
+          { text: "Space", callback_data: " " },
+          { text: "Newline", callback_data: "\n" },
+          { text: "Whitespace", callback_data: " next " },
+          { text: "Opaque", callback_data: "acme:task|prod" },
+          { text: "Boundary", callback_data: whitespaceBoundaryCallback },
+        ],
+      ]),
+    ).toEqual([
+      [
+        { text: "Space", callback_data: " " },
+        { text: "Newline", callback_data: "\n" },
+        { text: "Whitespace", callback_data: " next " },
+        { text: "Opaque", callback_data: "acme:task|prod" },
+        { text: "Boundary", callback_data: whitespaceBoundaryCallback },
+      ],
+    ]);
+  });
+
+  it.each([
+    { name: "typed approval", value: "tga1:e:o:plugin:request" },
+    { name: "malformed typed approval", value: "tga1:" },
+    { name: "whitespace-disguised typed approval", value: " tga1:e:o:request " },
+    { name: "typed question", value: "tgq1:ask_0123456789abcdef0123456789abcdef:0" },
+    { name: "malformed typed question", value: "tgq1:" },
+    { name: "whitespace-disguised typed question", value: " \ntgq1:ask_id:0\t " },
+    { name: "native command envelope", value: "tgcmd:/status" },
+    { name: "whitespace-disguised native command", value: " tgcmd:/status " },
+    { name: "opaque typed envelope", value: buildTelegramOpaqueCallbackData("custom:value") },
+    { name: "malformed opaque envelope", value: "tgcb1:" },
+    { name: "whitespace-disguised opaque envelope", value: " \ntgcb1:fake:value\t " },
+    { name: "arbitrary slash command", value: "/status" },
+    { name: "whitespace-disguised slash command", value: " \n/status\t " },
+    { name: "slash approval", value: "/approve request allow-always" },
+    { name: "slashless approval alias", value: "approve request always" },
+    { name: "case-insensitive approval", value: " APPROVE@bot request DeNy " },
+    { name: "plugin-binding approval", value: "pluginbind:request:a" },
+    { name: "malformed plugin-binding approval", value: " pluginbind: " },
+    { name: "managed multiselect", value: "OC_MULTI|toggle|env|prod" },
+    { name: "malformed managed multiselect", value: "OC_MULTI|" },
+    { name: "whitespace-disguised managed multiselect", value: " OC_MULTI|clear " },
+    { name: "managed select", value: "OC_SELECT|env|prod" },
+    { name: "whitespace-disguised managed select", value: "\nOC_SELECT|env|prod " },
+    { name: "model selection", value: "mdl_sel_openai/gpt-5" },
+    { name: "malformed model selection", value: "mdl_" },
+    { name: "whitespace-disguised model selection", value: " mdl_prov\n" },
+    { name: "commands pagination", value: "commands_page_2:private-agent" },
+    { name: "malformed commands pagination", value: "commands_page_" },
+    { name: "whitespace-disguised commands pagination", value: " commands_page_2\n" },
+  ])("rejects $name impersonation from model-authored callback buttons", ({ value }) => {
+    expect(() =>
+      parseTelegramInlineButtons([[{ text: "System control", callback_data: value }]]),
+    ).toThrow(/reserved Telegram runtime namespace; use typed presentation actions/);
+  });
+
+  it("keeps explicit empty rows ahead of interactive and presentation buttons", () => {
+    expect(
+      resolveTelegramInlineButtons({
+        buttons: parseTelegramInlineButtons([]),
+        interactive: {
+          blocks: [{ type: "buttons", buttons: [{ label: "Legacy", value: "legacy" }] }],
+        },
+        presentation: {
+          blocks: [{ type: "buttons", buttons: [{ label: "Portable", value: "portable" }] }],
+        },
+      }),
+    ).toEqual([]);
+  });
+
+  it.each([
+    { name: "invalid JSON", value: "[", message: /valid JSON button rows/ },
+    { name: "non-array JSON", value: "{}", message: /array of button rows/ },
+    { name: "malformed row", value: [{ text: "OK" }], message: /buttons\[0\].*array/ },
+    { name: "empty row", value: [[]], message: /buttons\[0\].*non-empty/ },
+    { name: "malformed button", value: [[null]], message: /buttons\[0\]\[0\].*object/ },
+    {
+      name: "empty text",
+      value: [[{ text: " ", callback_data: "ok" }]],
+      message: /\.text must be a non-empty string/,
+    },
+    {
+      name: "private-only text",
+      value: [[{ text: "<think>private reasoning</think>", callback_data: "ok" }]],
+      message: /\.text must be a non-empty string/,
+    },
+    {
+      name: "private-only runtime context",
+      value: [
+        [
+          {
+            text: "<<<BEGIN_OPENCLAW_INTERNAL_CONTEXT>>>private runtime context<<<END_OPENCLAW_INTERNAL_CONTEXT>>>",
+            callback_data: "ok",
+          },
+        ],
+      ],
+      message: /\.text must be a non-empty string/,
+    },
+    {
+      name: "empty callback",
+      value: [[{ text: "OK", callback_data: "" }]],
+      message: /\.callback_data must be a non-empty string/,
+    },
+    {
+      name: "65-byte UTF-8 callback",
+      value: [[{ text: "OK", callback_data: `${callbackData}x` }]],
+      message: /at most 64 UTF-8 bytes/,
+    },
+    {
+      name: "65-byte callback with leading whitespace",
+      value: [[{ text: "OK", callback_data: ` ${callbackData}` }]],
+      message: /at most 64 UTF-8 bytes/,
+    },
+    {
+      name: "unsupported style",
+      value: [[{ text: "OK", callback_data: "ok", style: "secondary" }]],
+      message: /\.style must be danger, success, or primary/,
+    },
+    {
+      name: "unsupported field",
+      value: [[{ text: "OK", callback_data: "ok", url: "https://example.com" }]],
+      message: /\.url is unsupported/,
+    },
+  ])("rejects $name with actionable button coordinates", ({ value, message }) => {
+    expect(() => parseTelegramInlineButtons(value)).toThrow(message);
+  });
+});
 
 describe("buildTelegramInteractiveButtons callback limits", () => {
   it("drops buttons whose callback payload exceeds Telegram limits", () => {

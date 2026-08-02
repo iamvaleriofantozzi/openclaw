@@ -23,6 +23,7 @@ import {
 } from "./accounts.js";
 import { isTelegramInlineButtonsEnabled } from "./inline-buttons.js";
 import {
+  createTelegramInlineButtonsExtraToolSchemas,
   createTelegramPollExtraToolSchemas,
   createTelegramRichSendExtraToolSchemas,
 } from "./message-tool-schema.js";
@@ -77,6 +78,7 @@ function prepareTelegramSendPayload({
 }: Parameters<NonNullable<ChannelMessageActionAdapter["prepareSendPayload"]>>[0]) {
   if (
     ctx.action !== "send" ||
+    ctx.params.buttons !== undefined ||
     (!payload.presentation && !payload.location && payload.videoAsNote !== true)
   ) {
     return null;
@@ -206,6 +208,12 @@ function describeTelegramMessageTool({
   if (discovery.isEnabled("sendMessage")) {
     schema.push({
       properties: createTelegramRichSendExtraToolSchemas(),
+      visibility: "all-configured",
+    });
+  }
+  if (discovery.buttonsEnabled) {
+    schema.push({
+      properties: createTelegramInlineButtonsExtraToolSchemas(),
       visibility: "all-configured",
     });
   }

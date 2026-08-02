@@ -31,7 +31,7 @@ import {
   resolveDefaultTelegramAccountId,
   resolveTelegramPollActionGateState,
 } from "./accounts.js";
-import { resolveTelegramInlineButtons } from "./button-types.js";
+import { parseTelegramInlineButtons, resolveTelegramInlineButtons } from "./button-types.js";
 import { telegramInboundEventDelivery } from "./inbound-event-delivery.js";
 import {
   resolveTelegramInlineButtonsScope,
@@ -223,6 +223,7 @@ function resolveTelegramButtonsFromParams(
 ) {
   return resolveTelegramInlineButtons(
     {
+      buttons: parseTelegramInlineButtons(params.buttons),
       presentation,
       interactive: params.interactive,
     },

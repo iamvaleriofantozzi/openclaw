@@ -1,5 +1,6 @@
 // Telegram plugin module implements button types behavior.
 import { parseExecApprovalCommandText } from "openclaw/plugin-sdk/approval-reply-runtime";
+import { sanitizeForPlainText } from "openclaw/plugin-sdk/channel-outbound";
 import { reduceLegacyInteractiveReply } from "openclaw/plugin-sdk/interactive-runtime";
 import {
   isMessagePresentationInteractiveBlock,
@@ -10,8 +11,11 @@ import {
   type MessagePresentation,
   type MessagePresentationButton,
 } from "openclaw/plugin-sdk/interactive-runtime";
+import { isRecord, normalizeOptionalString } from "openclaw/plugin-sdk/string-coerce-runtime";
+import { sanitizeAssistantVisibleText } from "openclaw/plugin-sdk/text-chunking";
 import {
   buildTelegramApprovalCallbackData,
+  fitsTelegramCallbackData,
   hasTelegramApprovalCallbackPrefix,
   rewriteTelegramApprovalDecisionAlias,
   sanitizeTelegramCallbackData,
@@ -38,11 +42,87 @@ type TelegramInlineButton = {
 export type TelegramInlineButtons = ReadonlyArray<ReadonlyArray<TelegramInlineButton>>;
 
 const TELEGRAM_INTERACTIVE_ROW_SIZE = 3;
+// Callback ingress trims before routing; reserve owner-controlled routes so
+// model-authored buttons cannot impersonate commands or runtime controls.
+const TELEGRAM_RESERVED_CALLBACK_ROUTE_RE =
+  /^(?:\/|tgcmd:|tgcb1:|pluginbind:|OC_MULTI\||OC_SELECT\||mdl_|commands_page_)/u;
 
-function toTelegramButtonStyle(
-  style?: MessagePresentationButton["style"],
-): TelegramInlineButton["style"] {
+function toTelegramButtonStyle(style: unknown): TelegramButtonStyle | undefined {
   return style === "danger" || style === "success" || style === "primary" ? style : undefined;
+}
+
+/** Parse the shipped native callback contract without rewriting callback envelopes. */
+export function parseTelegramInlineButtons(value: unknown): TelegramInlineButtons | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  let rows = value;
+  if (typeof rows === "string") {
+    try {
+      rows = JSON.parse(rows);
+    } catch {
+      throw new Error(
+        'Telegram buttons must be valid JSON button rows, e.g. [[{"text":"OK","callback_data":"ok"}]].',
+      );
+    }
+  }
+  if (!Array.isArray(rows)) {
+    throw new Error("Telegram buttons must be an array of button rows or a JSON-encoded array.");
+  }
+  return rows.map((row, rowIndex) => {
+    if (!Array.isArray(row) || row.length === 0) {
+      throw new Error(`Telegram buttons[${rowIndex}] must be a non-empty array of buttons.`);
+    }
+    return row.map((button, buttonIndex) => {
+      const buttonPath = `Telegram buttons[${rowIndex}][${buttonIndex}]`;
+      if (!isRecord(button)) {
+        throw new Error(`${buttonPath} must be an object with text and callback_data.`);
+      }
+      const unsupported = Object.keys(button).find(
+        (key) => key !== "text" && key !== "callback_data" && key !== "style",
+      );
+      if (unsupported) {
+        throw new Error(
+          `${buttonPath}.${unsupported} is unsupported; use text, callback_data, and optional style.`,
+        );
+      }
+      const rawText = normalizeOptionalString(button.text);
+      const text =
+        rawText &&
+        normalizeOptionalString(
+          sanitizeForPlainText(sanitizeAssistantVisibleText(rawText), { style: "markdown" }),
+        );
+      if (!text) {
+        throw new Error(`${buttonPath}.text must be a non-empty string.`);
+      }
+      const callbackData = button.callback_data;
+      if (
+        typeof callbackData !== "string" ||
+        callbackData.length === 0 ||
+        !fitsTelegramCallbackData(callbackData)
+      ) {
+        throw new Error(
+          `${buttonPath}.callback_data must be a non-empty string of at most 64 UTF-8 bytes.`,
+        );
+      }
+      const callbackRoute = callbackData.trim();
+      if (
+        hasTelegramApprovalCallbackPrefix(callbackRoute) ||
+        hasTelegramQuestionCallbackPrefix(callbackRoute) ||
+        parseExecApprovalCommandText(callbackRoute) !== null ||
+        TELEGRAM_RESERVED_CALLBACK_ROUTE_RE.test(callbackRoute)
+      ) {
+        throw new Error(
+          `${buttonPath}.callback_data uses a reserved Telegram runtime namespace; use typed presentation actions for system controls.`,
+        );
+      }
+      const style = toTelegramButtonStyle(button.style);
+      if (button.style !== undefined && !style) {
+        throw new Error(`${buttonPath}.style must be danger, success, or primary.`);
+      }
+      return { text, callback_data: callbackData, ...(style ? { style } : {}) };
+    });
+  });
 }
 
 function toTelegramInlineButton(

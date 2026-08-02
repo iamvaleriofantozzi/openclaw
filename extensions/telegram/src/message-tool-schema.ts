@@ -1,5 +1,5 @@
 // Telegram helper module supports message tool schema behavior.
-import { optionalPositiveIntegerSchema } from "openclaw/plugin-sdk/channel-actions";
+import { optionalPositiveIntegerSchema, stringEnum } from "openclaw/plugin-sdk/channel-actions";
 import { Type } from "typebox";
 
 export function createTelegramPollExtraToolSchemas() {
@@ -7,6 +7,26 @@ export function createTelegramPollExtraToolSchemas() {
     pollDurationSeconds: optionalPositiveIntegerSchema(),
     pollAnonymous: Type.Optional(Type.Boolean()),
     pollPublic: Type.Optional(Type.Boolean()),
+  };
+}
+
+/** Native Telegram callbacks stay distinct from portable presentation actions. */
+export function createTelegramInlineButtonsExtraToolSchemas() {
+  const button = Type.Object(
+    {
+      text: Type.String({ minLength: 1 }),
+      callback_data: Type.String({ minLength: 1, maxLength: 64 }),
+      style: Type.Optional(stringEnum(["danger", "success", "primary"])),
+    },
+    { additionalProperties: false },
+  );
+  return {
+    buttons: Type.Optional(
+      Type.Array(Type.Array(button, { minItems: 1 }), {
+        description:
+          "Telegram inline keyboard button rows; callback_data is limited to 64 UTF-8 bytes.",
+      }),
+    ),
   };
 }
 

@@ -29,6 +29,7 @@ import {
 } from "./bot.test-helpers.js";
 import type { TelegramBotOptions } from "./bot.types.js";
 import type { TelegramGetChat } from "./bot/types.js";
+import { parseTelegramInlineButtons } from "./button-types.js";
 import { buildTelegramOpaqueCallbackData } from "./native-command-callback-data.js";
 
 vi.mock("openclaw/plugin-sdk/conversation-runtime", { spy: true });
@@ -1655,6 +1656,73 @@ describe("createTelegramBot", () => {
     expect(answerCallbackQuerySpy).toHaveBeenCalledWith("cbq-1");
   });
 
+  it.each([
+    { name: "surrounding whitespace", value: " next ", modelValue: '" next "' },
+    { name: "one space", value: " ", modelValue: '" "' },
+    { name: "newline only", value: "\n", modelValue: '"\\n"' },
+    { name: "64-byte Unicode", value: "😀".repeat(16), modelValue: "😀".repeat(16) },
+    {
+      name: "64-byte Unicode with edge whitespace",
+      value: ` ${"😀".repeat(15)}ab `,
+      modelValue: JSON.stringify(` ${"😀".repeat(15)}ab `),
+    },
+  ])(
+    "round-trips $name callbacks from native buttons through inbound dispatch",
+    async ({ name, value, modelValue }) => {
+      const nativeButtons = parseTelegramInlineButtons([
+        [{ text: "Select", callback_data: value }],
+      ]);
+      const outboundCallbackData = expectDefined(
+        nativeButtons?.[0]?.[0]?.callback_data,
+        `${name} outbound callback bytes`,
+      );
+      expect(outboundCallbackData).toBe(value);
+
+      createTelegramBot({ token: "tok" });
+      const callbackId = `cbq-opaque-roundtrip-${name.replaceAll(" ", "-")}`;
+      await getCallbackHandler()(
+        makeCallbackRetryContext({ id: callbackId, data: outboundCallbackData, messageId: 10 }),
+      );
+
+      expect(replySpy).toHaveBeenCalledTimes(1);
+      const payload = requireValue(replySpy.mock.calls.at(0), "opaque callback agent payload")[0];
+      expect(payload.RawBody).toBe(`callback_data: ${modelValue}`);
+      if (value !== value.trim()) {
+        expect(JSON.parse(modelValue)).toBe(value);
+      }
+      expect(answerCallbackQuerySpy).toHaveBeenCalledWith(callbackId);
+    },
+  );
+
+  it("rejects 65-byte callbacks before the authenticated inbound boundary", () => {
+    expect(() =>
+      parseTelegramInlineButtons([[{ text: "Select", callback_data: `${"😀".repeat(16)}x` }]]),
+    ).toThrow(/at most 64 UTF-8 bytes/);
+  });
+
+  it.each([
+    { name: "space", value: " " },
+    { name: "newline", value: "\n" },
+  ])("keeps $name-only callbacks behind the sender allowlist", async ({ name, value }) => {
+    loadConfig.mockReturnValue({
+      channels: {
+        telegram: {
+          dmPolicy: "allowlist",
+          allowFrom: ["42"],
+          capabilities: { inlineButtons: "all" },
+        },
+      },
+    });
+    createTelegramBot({ token: "tok" });
+    const callbackId = `cbq-opaque-unauthorized-${name}`;
+    await getCallbackHandler()(
+      makeCallbackRetryContext({ id: callbackId, data: value, messageId: 10 }),
+    );
+
+    expect(replySpy).not.toHaveBeenCalled();
+    expect(answerCallbackQuerySpy).toHaveBeenCalledWith(callbackId);
+  });
+
   it("routes plugin callback_query payloads to plugin handlers without fallback callback_data text", async () => {
     const pluginHandler = vi.fn(async (ctx) => {
       expect(ctx.callback.namespace).toBe("code-agent");
@@ -1693,6 +1761,51 @@ describe("createTelegramBot", () => {
     });
     expect(answerCallbackQuerySpy).toHaveBeenCalledWith("cbq-plugin-1");
   });
+
+  it.each([
+    {
+      name: "direct opaque callback",
+      value: " code-agent:approve-123 ",
+      expectedCallbackData: " code-agent:approve-123 ",
+    },
+    {
+      name: "owner-minted opaque envelope",
+      value: buildTelegramOpaqueCallbackData("code-agent:approve-123 "),
+      expectedCallbackData: "code-agent:approve-123 ",
+    },
+    {
+      name: "whitespace-padded owner envelope",
+      value: ` ${buildTelegramOpaqueCallbackData("code-agent:approve-123")} `,
+      expectedCallbackData: "code-agent:approve-123",
+    },
+  ])(
+    "preserves exact $name bytes for the authenticated plugin handler",
+    async ({ name, value, expectedCallbackData }) => {
+      const pluginHandler = vi.fn(async (ctx) => {
+        expect(ctx.callback.data).toBe(expectedCallbackData);
+        expect(ctx.callback.namespace).toBe("code-agent");
+        expect(ctx.auth.isAuthorizedSender).toBe(true);
+        return { handled: true };
+      });
+      expect(
+        registerPluginInteractiveHandler("openclaw-code-agent", {
+          channel: "telegram",
+          namespace: "code-agent",
+          handler: pluginHandler,
+        }),
+      ).toEqual({ ok: true });
+
+      createTelegramBot({ token: "tok" });
+      const callbackId = `cbq-plugin-opaque-${name.replaceAll(" ", "-")}`;
+      await getCallbackHandler()(
+        makeCallbackRetryContext({ id: callbackId, data: value, messageId: 10 }),
+      );
+
+      expect(pluginHandler).toHaveBeenCalledTimes(1);
+      expect(replySpy).not.toHaveBeenCalled();
+      expect(answerCallbackQuerySpy).toHaveBeenCalledWith(callbackId);
+    },
+  );
 
   it("preserves raw slash callback_query payloads as command text", async () => {
     createTelegramBot({ token: "tok" });
@@ -1851,7 +1964,10 @@ describe("createTelegramBot", () => {
     );
   });
 
-  it("preserves native command source for prefixed callback_query payloads", async () => {
+  it.each([
+    { name: "canonical", value: "tgcmd:/fast status" },
+    { name: "whitespace-padded", value: " \ntgcmd:/fast status\t " },
+  ])("preserves native command source for $name callback_query payloads", async ({ value }) => {
     loadConfig.mockReturnValue({
       commands: { text: false, native: true },
       channels: {
@@ -1865,7 +1981,7 @@ describe("createTelegramBot", () => {
     createTelegramBot({ token: "tok" });
     const callbackHandler = getCallbackHandler();
     await callbackHandler(
-      makeCallbackRetryContext({ id: "cbq-native-1", data: "tgcmd:/fast status", messageId: 10 }),
+      makeCallbackRetryContext({ id: "cbq-native-1", data: value, messageId: 10 }),
     );
 
     expect(replySpy).toHaveBeenCalledTimes(1);
@@ -1873,6 +1989,31 @@ describe("createTelegramBot", () => {
     expect(payload.CommandBody).toBe("/fast status");
     expect(payload.CommandSource).toBe("native");
     expect(answerCallbackQuerySpy).toHaveBeenCalledWith("cbq-native-1");
+  });
+
+  it("keeps whitespace-padded approval controls on the trusted authorized route", async () => {
+    loadConfig.mockReturnValue({
+      channels: {
+        telegram: {
+          dmPolicy: "open",
+          allowFrom: ["*"],
+          execApprovals: { enabled: true, approvers: ["9"], target: "dm" },
+        },
+      },
+    });
+    createTelegramBot({ token: "tok" });
+    await getCallbackHandler()(
+      makeCallbackRetryContext({
+        id: "cbq-approval-padded-1",
+        data: " \n/approve 138e9b8c allow-once\t ",
+        messageId: 10,
+        text: "Approval required.",
+      }),
+    );
+
+    expect(resolveExecApprovalSpy).toHaveBeenCalledTimes(1);
+    expect(replySpy).not.toHaveBeenCalled();
+    expect(answerCallbackQuerySpy).toHaveBeenCalledWith("cbq-approval-padded-1");
   });
   it("reloads callback model routing bindings without recreating the bot", async () => {
     const buildModelsProviderDataMock =
