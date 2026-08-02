@@ -10,9 +10,13 @@ const systemAgentGatewayExecutionQueues = new WeakMap<
   KeyedAsyncQueue
 >();
 const retiredSystemAgentSessionMaps = new WeakSet<GatewayRequestContext["systemAgentSessions"]>();
-let retiredSystemAgentWizardSettlement: Promise<void> = Promise.resolve();
+const activeSystemAgentMutationSettlements = new WeakMap<
+  GatewayRequestContext["systemAgentSessions"],
+  Set<Promise<void>>
+>();
+let retiredSystemAgentMutationSettlement: Promise<void> = Promise.resolve();
 
-async function waitForRetiredSystemAgentWizardSettlement(): Promise<void> {
+async function waitForRetiredSystemAgentMutationSettlement(): Promise<void> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_resolve, reject) => {
     timer = setTimeout(() => {
@@ -25,7 +29,7 @@ async function waitForRetiredSystemAgentWizardSettlement(): Promise<void> {
     timer.unref?.();
   });
   try {
-    await Promise.race([retiredSystemAgentWizardSettlement, timeout]);
+    await Promise.race([retiredSystemAgentMutationSettlement, timeout]);
   } finally {
     if (timer) {
       clearTimeout(timer);
@@ -47,14 +51,17 @@ function getSystemAgentGatewayExecutionQueue(
 
 export function retireSystemAgentGatewayExecution(
   sessions: GatewayRequestContext["systemAgentSessions"],
-): void {
+): Promise<void> {
   retiredSystemAgentSessionMaps.add(sessions);
   systemAgentGatewayExecutionQueues.delete(sessions);
+  const settlements = Array.from(activeSystemAgentMutationSettlements.get(sessions) ?? []);
+  activeSystemAgentMutationSettlements.delete(sessions);
+  return Promise.all(settlements).then(() => undefined);
 }
 
-export function retainSystemAgentWizardSettlement(settlement: Promise<void>): void {
-  const previous = retiredSystemAgentWizardSettlement;
-  retiredSystemAgentWizardSettlement = Promise.all([previous, settlement]).then(() => undefined);
+export function retainRetiredSystemAgentMutationSettlement(settlement: Promise<void>): void {
+  const previous = retiredSystemAgentMutationSettlement;
+  retiredSystemAgentMutationSettlement = Promise.all([previous, settlement]).then(() => undefined);
 }
 
 export function assertSystemAgentGatewayExecutionActive(
@@ -69,9 +76,9 @@ export async function runSystemAgentGatewayTask<T>(
   task: () => Promise<T>,
   sessions: GatewayRequestContext["systemAgentSessions"],
 ): Promise<T> {
-  // A wizard that crossed its commit boundary cannot be cancelled. Preserve
-  // the old cross-generation mutation fence until that writer has settled.
-  await waitForRetiredSystemAgentWizardSettlement();
+  // A persistent writer that crossed its commit boundary cannot be cancelled.
+  // Preserve the cross-generation fence until every retired writer has settled.
+  await waitForRetiredSystemAgentMutationSettlement();
   assertSystemAgentGatewayExecutionActive(sessions);
   const queue = getSystemAgentGatewayExecutionQueue(sessions);
   // Track every accepted RPC as active, never queued: restart draining snapshots
@@ -86,4 +93,29 @@ export async function runSystemAgentGatewayTask<T>(
       return await task();
     }),
   );
+}
+
+export async function runSystemAgentGatewayMutationTask<T>(
+  task: () => Promise<T>,
+  sessions: GatewayRequestContext["systemAgentSessions"],
+): Promise<T> {
+  return await runSystemAgentGatewayTask(async () => {
+    let settleMutation: (() => void) | undefined;
+    const settlement = new Promise<void>((resolve) => {
+      settleMutation = resolve;
+    });
+    const activeSettlements =
+      activeSystemAgentMutationSettlements.get(sessions) ?? new Set<Promise<void>>();
+    activeSettlements.add(settlement);
+    activeSystemAgentMutationSettlements.set(sessions, activeSettlements);
+    try {
+      return await task();
+    } finally {
+      settleMutation?.();
+      activeSettlements.delete(settlement);
+      if (activeSettlements.size === 0) {
+        activeSystemAgentMutationSettlements.delete(sessions);
+      }
+    }
+  }, sessions);
 }

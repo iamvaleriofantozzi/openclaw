@@ -41,6 +41,7 @@ import { sanitizeSystemAgentChatParams } from "./system-agent-chat-params.js";
 import { queueDelegatedSystemAgentApproval } from "./system-agent-delegated-approval.js";
 import {
   assertSystemAgentGatewayExecutionActive,
+  runSystemAgentGatewayMutationTask,
   runSystemAgentGatewayTask,
 } from "./system-agent-execution-lifecycle.js";
 import type { GatewayClient, GatewayRequestContext, GatewayRequestHandlers } from "./types.js";
@@ -400,7 +401,7 @@ export const systemAgentHandlers: GatewayRequestHandlers = {
     }
     try {
       await runExclusiveSystemAgentSetupActivation(async () => {
-        await runSystemAgentGatewayTask(async () => {
+        await runSystemAgentGatewayMutationTask(async () => {
           const { activateSetupInference } = await import("../../system-agent/setup-inference.js");
           const runtime = {
             ...defaultRuntime,

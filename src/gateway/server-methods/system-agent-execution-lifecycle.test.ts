@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { createDeferred } from "../../test-utils/deferred.js";
-import { runSystemAgentGatewayTask } from "./system-agent-execution-lifecycle.js";
+import {
+  runSystemAgentGatewayMutationTask,
+  runSystemAgentGatewayTask,
+} from "./system-agent-execution-lifecycle.js";
 import { disposeSystemAgentSessions } from "./system-agent-session-disposal.js";
 import type { GatewayRequestContext } from "./types.js";
 
@@ -47,5 +50,29 @@ describe("system-agent Gateway execution lifecycle", () => {
 
     releaseStale.resolve();
     await expect(stale).resolves.toBe("stale");
+  });
+
+  it("holds replacement work until a retired direct mutation settles", async () => {
+    const staleSessions: GatewayRequestContext["systemAgentSessions"] = new Map();
+    const replacementSessions: GatewayRequestContext["systemAgentSessions"] = new Map();
+    const mutationStarted = createDeferred();
+    const releaseMutation = createDeferred();
+    const mutation = runSystemAgentGatewayMutationTask(async () => {
+      mutationStarted.resolve();
+      await releaseMutation.promise;
+      return "mutated";
+    }, staleSessions);
+    await mutationStarted.promise;
+
+    const disposal = disposeSystemAgentSessions(staleSessions, new Map());
+    const replacementTask = vi.fn(async () => "replacement");
+    const replacement = runSystemAgentGatewayTask(replacementTask, replacementSessions);
+    await Promise.resolve();
+    expect(replacementTask).not.toHaveBeenCalled();
+
+    releaseMutation.resolve();
+    await expect(mutation).resolves.toBe("mutated");
+    await expect(disposal).resolves.toBeUndefined();
+    await expect(replacement).resolves.toBe("replacement");
   });
 });

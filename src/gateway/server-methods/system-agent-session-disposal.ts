@@ -1,5 +1,5 @@
 import {
-  retainSystemAgentWizardSettlement,
+  retainRetiredSystemAgentMutationSettlement,
   retireSystemAgentGatewayExecution,
 } from "./system-agent-execution-lifecycle.js";
 import type { GatewayRequestContext } from "./types.js";
@@ -18,7 +18,7 @@ export async function disposeSystemAgentSessions(
   );
   // Reject callbacks admitted by this Gateway generation before releasing any
   // session owner. Otherwise a queued callback could repopulate the retired map.
-  retireSystemAgentGatewayExecution(sessions);
+  const gatewayMutationSettlement = retireSystemAgentGatewayExecution(sessions);
   // Clear ownership before awaiting disposal so no new request can rediscover
   // a generation whose engines are already releasing QR secrets and timers.
   const ownedSessions = Array.from(sessions.values());
@@ -26,10 +26,12 @@ export async function disposeSystemAgentSessions(
   const persistentApplySettlements = ownedSessions
     .map((session) => session.engine.getPersistentApplySettlement())
     .filter((settlement): settlement is Promise<void> => settlement !== null);
-  const mutationSettlement = Promise.all([wizardSettlement, ...persistentApplySettlements]).then(
-    () => undefined,
-  );
-  retainSystemAgentWizardSettlement(mutationSettlement);
+  const mutationSettlement = Promise.all([
+    gatewayMutationSettlement,
+    wizardSettlement,
+    ...persistentApplySettlements,
+  ]).then(() => undefined);
+  retainRetiredSystemAgentMutationSettlement(mutationSettlement);
   const results = await Promise.allSettled([
     mutationSettlement,
     ...ownedSessions.map((session) => session.engine.dispose()),
