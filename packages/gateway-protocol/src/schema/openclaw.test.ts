@@ -160,6 +160,29 @@ describe("OpenClaw chat result protocol", () => {
         },
       }),
     ).toBe(false);
+    for (const dataUrl of [
+      QR_DATA_URL_PREFIX,
+      `${QR_DATA_URL_PREFIX}A`,
+      `${QR_DATA_URL_PREFIX}A===`,
+      `${QR_DATA_URL_PREFIX}AAAA=`,
+      `${QR_DATA_URL_PREFIX}AA=A`,
+      `${QR_DATA_URL_PREFIX}AA A`,
+    ]) {
+      expect(
+        Value.Check(SystemAgentChatResultSchema, {
+          sessionId: "setup-session",
+          reply: "Scan this QR code, then continue.",
+          action: "none",
+          presentation: {
+            kind: "qr",
+            wizardInputPending: true,
+            dataUrl,
+            expiresAtMs: 1_800_000,
+            question,
+          },
+        }),
+      ).toBe(false);
+    }
     const result = {
       sessionId: "setup-session",
       reply: "Scan this QR code, then continue.",

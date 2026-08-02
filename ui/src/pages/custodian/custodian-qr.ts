@@ -1,15 +1,21 @@
 import type { SystemAgentChatPresentation } from "@openclaw/gateway-protocol";
-import { QR_PNG_DATA_URL_MAX_LENGTH } from "@openclaw/gateway-protocol/schema";
+import {
+  QR_PNG_DATA_URL_MAX_LENGTH,
+  QR_PNG_DATA_URL_PREFIX,
+} from "@openclaw/gateway-protocol/schema";
+import { sanitizeInlineImageDataUrl } from "@openclaw/media-core/inline-image-data-url";
 import { parseCustodianQuestion, type CustodianStructuredQuestion } from "./structured-question.ts";
 
-const QR_PNG_DATA_URL_PATTERN = /^data:image\/png;base64,[A-Za-z0-9+/]*={0,2}$/u;
-
 function parseCustodianQrPngDataUrl(value: unknown): string | undefined {
-  return typeof value === "string" &&
-    value.length <= QR_PNG_DATA_URL_MAX_LENGTH &&
-    QR_PNG_DATA_URL_PATTERN.test(value)
-    ? value
-    : undefined;
+  if (
+    typeof value !== "string" ||
+    value.length > QR_PNG_DATA_URL_MAX_LENGTH ||
+    !value.startsWith(QR_PNG_DATA_URL_PREFIX)
+  ) {
+    return undefined;
+  }
+  const sanitized = sanitizeInlineImageDataUrl(value);
+  return sanitized?.startsWith(QR_PNG_DATA_URL_PREFIX) ? sanitized : undefined;
 }
 
 type CustodianQrPresentation = {

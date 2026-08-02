@@ -82,25 +82,29 @@ describe("custodian page QR presentation", () => {
     expect(page.store.messages.some((message) => message.qrDataUrl !== undefined)).toBe(false);
   });
 
-  it.each(["https://attacker.example/qr.png", `data:image/png;base64,${"A".repeat(16_384)}`])(
-    "rejects an invalid QR image URL before rendering it",
-    async (qrDataUrl) => {
-      const request = vi.fn().mockResolvedValue({
-        sessionId: "control-ui-onboarding-00000000-0000-4000-8000-000000000001",
-        reply: "Continue setup.",
-        action: "none",
-        presentation: createCustodianQrPresentation(qrDataUrl),
-      });
-      const { context } = createContext(request);
-      const { page } = await mountPage(context);
+  it.each([
+    "https://attacker.example/qr.png",
+    "data:image/png;base64,",
+    "data:image/png;base64,A",
+    "data:image/png;base64,AA=A",
+    "data:image/png;base64,Zm9v",
+    `data:image/png;base64,${"A".repeat(16_384)}`,
+  ])("rejects an invalid QR image URL before rendering it", async (qrDataUrl) => {
+    const request = vi.fn().mockResolvedValue({
+      sessionId: "control-ui-onboarding-00000000-0000-4000-8000-000000000001",
+      reply: "Continue setup.",
+      action: "none",
+      presentation: createCustodianQrPresentation(qrDataUrl),
+    });
+    const { context } = createContext(request);
+    const { page } = await mountPage(context);
 
-      await waitForFast(() => expect(page.textContent).toContain("Continue setup."));
-      expect(page.querySelector(".custodian__qr-code")).toBeNull();
-      expect(page.querySelector("openclaw-option-card")).toBeNull();
-      expect(page.store.wizardInputPending).toBe(false);
-      expect(page.store.messages.some((message) => message.qrDataUrl !== undefined)).toBe(false);
-    },
-  );
+    await waitForFast(() => expect(page.textContent).toContain("Continue setup."));
+    expect(page.querySelector(".custodian__qr-code")).toBeNull();
+    expect(page.querySelector("openclaw-option-card")).toBeNull();
+    expect(page.store.wizardInputPending).toBe(false);
+    expect(page.store.messages.some((message) => message.qrDataUrl !== undefined)).toBe(false);
+  });
 
   it("restores QR bytes when acknowledgement delivery is explicitly unsent", async () => {
     const request = vi

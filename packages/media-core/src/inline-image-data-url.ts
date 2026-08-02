@@ -6,7 +6,7 @@ export const INLINE_IMAGE_DATA_URL_PREFIX = "data:";
 
 const IMAGE_SIGNATURES: Array<{
   mime: string;
-  matches: (buffer: Buffer) => boolean;
+  matches: (buffer: Uint8Array) => boolean;
 }> = [
   {
     mime: "image/png",
@@ -30,15 +30,15 @@ const IMAGE_SIGNATURES: Array<{
     mime: "image/webp",
     matches: (buffer) =>
       buffer.length >= 12 &&
-      buffer.subarray(0, 4).toString("ascii") === "RIFF" &&
-      buffer.subarray(8, 12).toString("ascii") === "WEBP",
+      String.fromCharCode(...buffer.subarray(0, 4)) === "RIFF" &&
+      String.fromCharCode(...buffer.subarray(8, 12)) === "WEBP",
   },
   {
     mime: "image/gif",
     matches: (buffer) =>
       buffer.length >= 6 &&
-      (buffer.subarray(0, 6).toString("ascii") === "GIF87a" ||
-        buffer.subarray(0, 6).toString("ascii") === "GIF89a"),
+      (String.fromCharCode(...buffer.subarray(0, 6)) === "GIF87a" ||
+        String.fromCharCode(...buffer.subarray(0, 6)) === "GIF89a"),
   },
   {
     mime: "image/bmp",
@@ -58,13 +58,13 @@ function startsWithDataUrl(value: string): boolean {
   );
 }
 
-function sniffIsoBmffImageMime(buffer: Buffer): string | undefined {
-  if (buffer.length < 12 || buffer.subarray(4, 8).toString("ascii") !== "ftyp") {
+function sniffIsoBmffImageMime(buffer: Uint8Array): string | undefined {
+  if (buffer.length < 12 || String.fromCharCode(...buffer.subarray(4, 8)) !== "ftyp") {
     return undefined;
   }
-  const brands = [buffer.subarray(8, 12).toString("ascii")];
+  const brands = [String.fromCharCode(...buffer.subarray(8, 12))];
   for (let offset = 16; offset + 4 <= buffer.length; offset += 4) {
-    brands.push(buffer.subarray(offset, offset + 4).toString("ascii"));
+    brands.push(String.fromCharCode(...buffer.subarray(offset, offset + 4)));
   }
   if (brands.some((brand) => HEIC_BRANDS.has(brand))) {
     return "image/heic";
@@ -76,7 +76,7 @@ function sniffIsoBmffImageMime(buffer: Buffer): string | undefined {
 }
 
 /** Sniffs supported inline image formats from decoded bytes. */
-export function sniffInlineImageMime(buffer: Buffer): string | undefined {
+export function sniffInlineImageMime(buffer: Uint8Array): string | undefined {
   return (
     IMAGE_SIGNATURES.find((signature) => signature.matches(buffer))?.mime ??
     sniffIsoBmffImageMime(buffer)
@@ -104,8 +104,9 @@ export function sanitizeInlineImageBase64(params: {
   if (!canonicalPayload) {
     return undefined;
   }
+  const binaryPrefix = atob(canonicalPayload.slice(0, IMAGE_SIGNATURE_PREFIX_BASE64_CHARS));
   const sniffedMimeType = sniffInlineImageMime(
-    Buffer.from(canonicalPayload.slice(0, IMAGE_SIGNATURE_PREFIX_BASE64_CHARS), "base64"),
+    Uint8Array.from(binaryPrefix, (char) => char.charCodeAt(0)),
   );
   if (!sniffedMimeType) {
     return undefined;
