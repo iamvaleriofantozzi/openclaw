@@ -9349,18 +9349,6 @@ public struct SystemAgentChatAcknowledgementQuestion: Codable, Sendable {
     }
 
     public init(from decoder: Decoder) throws {
-        let rawContainer = try decoder.container(keyedBy: GatewayAnyCodingKey.self)
-        let unexpectedKeys = rawContainer.allKeys
-            .map(\.stringValue)
-            .filter { !Set(["id", "header", "question", "options", "allowSkip"]).contains($0) }
-        if !unexpectedKeys.isEmpty {
-            throw DecodingError.dataCorrupted(
-                .init(
-                    codingPath: rawContainer.codingPath,
-                    debugDescription: "Unexpected keys for SystemAgentChatAcknowledgementQuestion: \(unexpectedKeys.sorted().joined(separator: ", "))"
-                )
-            )
-        }
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.id = try container.decode(String.self, forKey: .id)
         self.header = try container.decode(String.self, forKey: .header)
@@ -9421,18 +9409,6 @@ public struct SystemAgentChatPresentation: Codable, Sendable {
     }
 
     public init(from decoder: Decoder) throws {
-        let rawContainer = try decoder.container(keyedBy: GatewayAnyCodingKey.self)
-        let unexpectedKeys = rawContainer.allKeys
-            .map(\.stringValue)
-            .filter { !Set(["kind", "dataUrl", "expiresAtMs", "wizardInputPending", "question"]).contains($0) }
-        if !unexpectedKeys.isEmpty {
-            throw DecodingError.dataCorrupted(
-                .init(
-                    codingPath: rawContainer.codingPath,
-                    debugDescription: "Unexpected keys for SystemAgentChatPresentation: \(unexpectedKeys.sorted().joined(separator: ", "))"
-                )
-            )
-        }
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let decodedKind = try container.decode(String.self, forKey: .kind)
         guard decodedKind == "qr" else {

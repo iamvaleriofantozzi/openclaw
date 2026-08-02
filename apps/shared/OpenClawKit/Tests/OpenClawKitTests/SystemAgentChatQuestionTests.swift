@@ -118,6 +118,35 @@ struct SystemAgentChatQuestionTests {
     }
 
     @Test
+    func `QR presentation ignores additive nested fields`() throws {
+        let json =
+            """
+            {
+              "kind": "qr",
+              "dataUrl": "data:image/png;base64,AAAA",
+              "expiresAtMs": 1,
+              "wizardInputPending": true,
+              "futurePresentation": {"ignored": true},
+              "question": {
+                "id": "setup-qr",
+                "header": "Scan QR code",
+                "question": "Scan, then continue.",
+                "options": [{"label": "Continue"}],
+                "allowSkip": false,
+                "futureQuestion": ["ignored"]
+              }
+            }
+            """
+        let decoded = try JSONDecoder().decode(
+            SystemAgentChatPresentation.self,
+            from: Data(json.utf8))
+
+        #expect(decoded.kind == "qr")
+        #expect(decoded.question.id == "setup-qr")
+        #expect(decoded.question.options.count == 1)
+    }
+
+    @Test
     func `QR presentation rejects competing top-level state`() {
         let invalidResults = [
             """
