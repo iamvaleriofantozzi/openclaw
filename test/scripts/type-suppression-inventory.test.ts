@@ -71,6 +71,8 @@ describe("type suppression inventory", () => {
         .filter((finding) => finding.kind === "expect-error")
         .map((finding) => `${finding.file}:${finding.line}:${finding.excerpt}`),
     ).toEqual([
+      "packages/gateway-protocol/src/schema/openclaw.test.ts:304:@ts-expect-error QR presentation cannot accompany a navigation action.",
+      "packages/gateway-protocol/src/schema/openclaw.test.ts:318:@ts-expect-error QR acknowledgement is exactly one option.",
       "src/infra/kysely-sync.types.test.ts:49:@ts-expect-error Kysely checks selected column string literals.",
       "src/infra/kysely-sync.types.test.ts:52:@ts-expect-error Kysely checks table string literals.",
       "src/infra/kysely-sync.types.test.ts:55:@ts-expect-error Kysely checks where-reference string literals.",
