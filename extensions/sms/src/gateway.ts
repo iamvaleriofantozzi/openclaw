@@ -103,13 +103,21 @@ async function registerSmsWebhookRoute(params: {
   });
   let unregisterRoute: () => void;
   try {
+    const webhookHandler = createSmsWebhookHandler({ ...params, ingress });
     unregisterRoute = registerPluginHttpRoute({
       path: webhookPath,
       auth: "plugin",
       pluginId: CHANNEL_ID,
       accountId: params.account.accountId,
+      throwOnFailure: true,
       log: (msg) => params.log?.info?.(msg),
-      handler: createSmsWebhookHandler({ ...params, ingress }),
+      handler: async (req, res) => {
+        if (req.method === "GET" || req.method === "HEAD") {
+          const { tryHandleHostedSmsMediaRequest } = await import("./media.js");
+          return await tryHandleHostedSmsMediaRequest(req, res, params.account.accountId);
+        }
+        return await webhookHandler(req, res);
+      },
     });
   } catch (error) {
     await Promise.allSettled([predecessorStop, ingress.stop()]);
