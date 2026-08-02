@@ -75,4 +75,32 @@ describe("system-agent Gateway execution lifecycle", () => {
     await expect(disposal).resolves.toBeUndefined();
     await expect(replacement).resolves.toBe("replacement");
   });
+
+  it("holds replacement work until a queued retired mutation is rejected", async () => {
+    const staleSessions: GatewayRequestContext["systemAgentSessions"] = new Map();
+    const replacementSessions: GatewayRequestContext["systemAgentSessions"] = new Map();
+    const staleStarted = createDeferred();
+    const releaseStale = createDeferred();
+    const stale = runSystemAgentGatewayTask(async () => {
+      staleStarted.resolve();
+      await releaseStale.promise;
+      return "stale";
+    }, staleSessions);
+    await staleStarted.promise;
+
+    const mutationTask = vi.fn(async () => "mutated");
+    const mutation = runSystemAgentGatewayMutationTask(mutationTask, staleSessions);
+    const disposal = disposeSystemAgentSessions(staleSessions, new Map());
+    const replacementTask = vi.fn(async () => "replacement");
+    const replacement = runSystemAgentGatewayTask(replacementTask, replacementSessions);
+    await Promise.resolve();
+    expect(replacementTask).not.toHaveBeenCalled();
+
+    releaseStale.resolve();
+    await expect(stale).resolves.toBe("stale");
+    await expect(mutation).rejects.toThrow("Gateway generation has been retired");
+    expect(mutationTask).not.toHaveBeenCalled();
+    await expect(disposal).resolves.toBeUndefined();
+    await expect(replacement).resolves.toBe("replacement");
+  });
 });

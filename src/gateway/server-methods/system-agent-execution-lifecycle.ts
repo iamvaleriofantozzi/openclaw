@@ -103,23 +103,24 @@ export async function runSystemAgentGatewayMutationTask<T>(
   task: () => Promise<T>,
   sessions: GatewayRequestContext["systemAgentSessions"],
 ): Promise<T> {
-  return await runSystemAgentGatewayTask(async () => {
-    let settleMutation: (() => void) | undefined;
-    const settlement = new Promise<void>((resolve) => {
-      settleMutation = resolve;
-    });
-    const activeSettlements =
-      activeSystemAgentMutationSettlements.get(sessions) ?? new Set<Promise<void>>();
-    activeSettlements.add(settlement);
-    activeSystemAgentMutationSettlements.set(sessions, activeSettlements);
-    try {
-      return await task();
-    } finally {
-      settleMutation?.();
-      activeSettlements.delete(settlement);
-      if (activeSettlements.size === 0) {
-        activeSystemAgentMutationSettlements.delete(sessions);
-      }
+  assertSystemAgentGatewayExecutionActive(sessions);
+  let settleMutation: (() => void) | undefined;
+  const settlement = new Promise<void>((resolve) => {
+    settleMutation = resolve;
+  });
+  const activeSettlements =
+    activeSystemAgentMutationSettlements.get(sessions) ?? new Set<Promise<void>>();
+  // Register at admission, before the task can wait behind older work. Restart
+  // must fence every accepted writer, including one still queued for execution.
+  activeSettlements.add(settlement);
+  activeSystemAgentMutationSettlements.set(sessions, activeSettlements);
+  try {
+    return await runSystemAgentGatewayTask(task, sessions);
+  } finally {
+    settleMutation?.();
+    activeSettlements.delete(settlement);
+    if (activeSettlements.size === 0) {
+      activeSystemAgentMutationSettlements.delete(sessions);
     }
-  }, sessions);
+  }
 }
