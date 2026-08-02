@@ -83,6 +83,7 @@ export type DeliverFn = (
       deliveryQueueId?: string;
       deliveryQueueStateDir?: string;
       deliveryProducerClaimId?: string;
+      deliveryProducerLeaseRequired?: boolean;
       skipQueue?: boolean;
       deferredDeliveryAdmissionPassed?: true;
       deferCommitHooks?: boolean;
@@ -254,16 +255,28 @@ function needsUnknownSendReconciliation(entry: QueuedDelivery): boolean {
   );
 }
 
-function hasActiveStableDeliveryOwner(entry: QueuedDelivery, now: number): boolean {
+function hasActiveStableDeliveryOwner(
+  entry: QueuedDelivery,
+  now: number,
+): entry is QueuedDelivery & { availableAt: number } {
   return (
     (typeof entry.completionRetention === "object" ||
       entry.completionRetention === "permanent" ||
       entry.requiresProducerClaim === true) &&
     (entry.recoveryState === "producer_claimed" ||
-      (entry.recoveryState === "send_attempt_started" && entry.requiresProducerClaim === true)) &&
+      ((entry.recoveryState === "send_attempt_started" ||
+        entry.recoveryState === "unknown_after_send") &&
+        entry.requiresProducerClaim === true)) &&
     typeof entry.availableAt === "number" &&
     entry.availableAt > now
   );
+}
+
+function recordRecoveryRevisit(summary: DeliveryRecoverySummary, nextRecoveryAt: number): void {
+  summary.nextRecoveryAt =
+    summary.nextRecoveryAt === undefined
+      ? nextRecoveryAt
+      : Math.min(summary.nextRecoveryAt, nextRecoveryAt);
 }
 
 function queuedDeadLetterAuditTerminals(entry: QueuedDelivery) {
@@ -328,6 +341,7 @@ function buildRecoveryDeliverParams(
     deliveryQueueId: entry.id,
     deliveryQueueStateDir: stateDir,
     ...(producerClaimId ? { deliveryProducerClaimId: producerClaimId } : {}),
+    ...(entry.requiresProducerClaim === true ? { deliveryProducerLeaseRequired: true } : {}),
     skipQueue: true, // Prevent re-enqueueing during recovery.
     deferredDeliveryAdmissionPassed: true,
     deferCommitHooks: true,
@@ -1361,6 +1375,7 @@ export async function recoverPendingDeliveries(opts: {
     },
     onEntry: async (currentEntry) => {
       if (hasActiveStableDeliveryOwner(currentEntry, Date.now())) {
+        recordRecoveryRevisit(summary, currentEntry.availableAt);
         opts.log.info(`Recovery skipped for delivery ${currentEntry.id}: active platform owner`);
         return "continue";
       }

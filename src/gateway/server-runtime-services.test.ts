@@ -17,6 +17,8 @@ function waitForFast<T>(
 
 type StartSessionDeliveryRuntime =
   typeof import("../infra/session-delivery-queue-runtime.js").startSessionDeliveryRuntime;
+type RecoverPendingDeliveries =
+  typeof import("../infra/outbound/delivery-queue.js").recoverPendingDeliveries;
 
 const hoisted = vi.hoisted(() => {
   const heartbeatRunner = {
@@ -40,7 +42,12 @@ const hoisted = vi.hoisted(() => {
     ),
     schedulePendingSessionDeliveries: vi.fn(async () => undefined),
     startSessionUpstreamMonitor: vi.fn(() => ({ stop: stopSessionUpstreamMonitor })),
-    recoverPendingDeliveries: vi.fn(async () => undefined),
+    recoverPendingDeliveries: vi.fn<RecoverPendingDeliveries>(async () => ({
+      recovered: 0,
+      failed: 0,
+      skippedMaxRetries: 0,
+      deferredBackoff: 0,
+    })),
     recoverPendingRestartContinuationDeliveries: vi.fn(async () => undefined),
     deliverQueuedSessionDelivery: vi.fn(async () => undefined),
     settleQueuedSessionDelivery: vi.fn(async () => undefined),
@@ -115,7 +122,13 @@ describe("server-runtime-services", () => {
     hoisted.stopSessionDeliveryRuntime.mockClear();
     hoisted.startSessionDeliveryRuntime.mockClear();
     hoisted.schedulePendingSessionDeliveries.mockClear();
-    hoisted.recoverPendingDeliveries.mockClear();
+    hoisted.recoverPendingDeliveries.mockReset();
+    hoisted.recoverPendingDeliveries.mockResolvedValue({
+      recovered: 0,
+      failed: 0,
+      skippedMaxRetries: 0,
+      deferredBackoff: 0,
+    });
     hoisted.recoverPendingRestartContinuationDeliveries.mockClear();
     hoisted.deliverQueuedSessionDelivery.mockClear();
     hoisted.settleQueuedSessionDelivery.mockClear();
@@ -365,6 +378,121 @@ describe("server-runtime-services", () => {
       "recovered",
     );
     expect(hoisted.schedulePendingSessionDeliveries).toHaveBeenCalledTimes(1);
+  });
+
+  it("revisits outbound recovery after an active stable producer lease expires", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(10_000);
+    const startupConfig = { gateway: { port: 18_789 } } as never;
+    const reloadedConfig = { gateway: { port: 19_000 } } as never;
+    let currentConfig = startupConfig;
+    const firstLeaseExpiry = Date.now() + 30_000;
+    const secondLeaseExpiry = firstLeaseExpiry + 30_000;
+    hoisted.recoverPendingDeliveries
+      .mockResolvedValueOnce({
+        recovered: 0,
+        failed: 0,
+        skippedMaxRetries: 0,
+        deferredBackoff: 0,
+        nextRecoveryAt: firstLeaseExpiry,
+      })
+      .mockResolvedValueOnce({
+        recovered: 0,
+        failed: 0,
+        skippedMaxRetries: 0,
+        deferredBackoff: 0,
+        nextRecoveryAt: secondLeaseExpiry,
+      });
+
+    const { services } = activateScheduledServicesForTest({
+      cfgAtStart: startupConfig,
+      readCurrentConfig: () => currentConfig,
+    });
+    await vi.dynamicImportSettled();
+    expect(hoisted.recoverPendingDeliveries).toHaveBeenCalledTimes(1);
+    expect(hoisted.recoverPendingDeliveries.mock.calls[0]?.[0]?.cfg).toBe(startupConfig);
+
+    currentConfig = reloadedConfig;
+    await vi.advanceTimersByTimeAsync(29_999);
+    expect(hoisted.recoverPendingDeliveries).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await vi.dynamicImportSettled();
+    expect(hoisted.recoverPendingDeliveries).toHaveBeenCalledTimes(2);
+    expect(hoisted.recoverPendingDeliveries.mock.calls[1]?.[0]?.cfg).toBe(reloadedConfig);
+
+    await services.stopOutboundDeliveryRecovery();
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(hoisted.recoverPendingDeliveries).toHaveBeenCalledTimes(2);
+    services.heartbeatRunner.stop();
+  });
+
+  it("waits for an active outbound recovery before its stop handle settles", async () => {
+    let resolveRecovery:
+      | ((summary: Awaited<ReturnType<RecoverPendingDeliveries>>) => void)
+      | undefined;
+    hoisted.recoverPendingDeliveries.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveRecovery = resolve;
+        }),
+    );
+
+    const { services } = activateScheduledServicesForTest();
+    await waitForFast(() => expect(hoisted.recoverPendingDeliveries).toHaveBeenCalledOnce());
+
+    let stopped = false;
+    const stopPromise = services.stopOutboundDeliveryRecovery().then(() => {
+      stopped = true;
+    });
+    await Promise.resolve();
+    expect(stopped).toBe(false);
+
+    if (!resolveRecovery) {
+      throw new Error("Expected outbound recovery resolver to be initialized");
+    }
+    resolveRecovery({
+      recovered: 0,
+      failed: 0,
+      skippedMaxRetries: 0,
+      deferredBackoff: 0,
+    });
+    await stopPromise;
+    expect(stopped).toBe(true);
+    services.heartbeatRunner.stop();
+  });
+
+  it("bounds outbound recovery shutdown handoff without rearming", async () => {
+    vi.useFakeTimers();
+    hoisted.recoverPendingDeliveries.mockImplementationOnce(() => new Promise(() => {}));
+    const log = createLog();
+    const { services } = activateScheduledServicesForTest({ log });
+    await vi.dynamicImportSettled();
+    expect(hoisted.recoverPendingDeliveries).toHaveBeenCalledOnce();
+
+    let firstStopped = false;
+    let secondStopped = false;
+    const firstStop = services.stopOutboundDeliveryRecovery().then(() => {
+      firstStopped = true;
+    });
+    const secondStop = services.stopOutboundDeliveryRecovery().then(() => {
+      secondStopped = true;
+    });
+
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(firstStopped).toBe(false);
+    expect(secondStopped).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    await Promise.all([firstStop, secondStop]);
+    expect(firstStopped).toBe(true);
+    expect(secondStopped).toBe(true);
+    expect(log.child.mock.results[0]?.value.warn).toHaveBeenCalledOnce();
+    expect(log.child.mock.results[0]?.value.warn).toHaveBeenCalledWith(
+      "delivery recovery shutdown handoff exceeded 5000ms; continuing shutdown",
+    );
+
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(hoisted.recoverPendingDeliveries).toHaveBeenCalledOnce();
+    services.heartbeatRunner.stop();
   });
 
   it("schedules pending session deliveries when startup recovery fails", async () => {
@@ -673,9 +801,11 @@ function activateScheduledServicesForTest(
   const cronState = createTestCronState(cron);
   const cronStart = cron.start;
   const log = overrides.log ?? createLog();
+  const cfgAtStart = overrides.cfgAtStart ?? ({} as never);
   const services = activateGatewayScheduledServices({
     minimalTestGateway: false,
-    cfgAtStart: {} as never,
+    cfgAtStart,
+    readCurrentConfig: () => cfgAtStart,
     deps: {} as never,
     sessionDeliveryRecoveryMaxEnqueuedAt: 123,
     cronReconciliation: createTestCronReconciliation(),

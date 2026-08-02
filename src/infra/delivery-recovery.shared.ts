@@ -33,6 +33,8 @@ export type DeliveryRecoverySummary = {
   failed: number;
   skippedMaxRetries: number;
   deferredBackoff: number;
+  /** Optional time when a lifecycle owner should run another recovery scan. */
+  nextRecoveryAt?: number;
 };
 
 export type DeliveryRecoveryDrainDecision = {
