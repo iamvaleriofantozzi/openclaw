@@ -1,7 +1,10 @@
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import { resolveBootstrapWarningSignaturesSeen } from "../../agents/bootstrap-budget.js";
 import type { BootstrapContextRunKind } from "../../agents/bootstrap-mode.js";
-import type { AgentExecutionStartedInfo } from "../../agents/embedded-agent-runner/run/internal-params.js";
+import type {
+  AgentExecutionStartedInfo,
+  RunEmbeddedAgentInternalParams,
+} from "../../agents/embedded-agent-runner/run/internal-params.js";
 import type { RunEmbeddedAgentParams } from "../../agents/embedded-agent-runner/run/params.js";
 import { runEmbeddedAgent } from "../../agents/embedded-agent.js";
 import type { FastModeAutoProgressState } from "../../agents/fast-mode.js";
@@ -191,8 +194,8 @@ export async function runEmbeddedFallbackCandidate(params: {
       sessionKey: turn.sessionKey,
       milestone: "before_embedded_run",
     });
-    const result = await params.timing.measure("embedded_run", () =>
-      runEmbeddedAgent({
+    const result = await params.timing.measure("embedded_run", () => {
+      const embeddedRunParams: RunEmbeddedAgentInternalParams = {
         ...embeddedContext,
         messageActionTurnCapability,
         attribution: turn.attribution,
@@ -396,8 +399,9 @@ export async function runEmbeddedFallbackCandidate(params: {
               };
             })()
           : undefined,
-      }),
-    );
+      };
+      return runEmbeddedAgent(embeddedRunParams);
+    });
     const resultCompactionCount = Math.max(0, result.meta?.agentMeta?.compactionCount ?? 0);
     attemptCompactionCount = Math.max(attemptCompactionCount, resultCompactionCount);
     return {
