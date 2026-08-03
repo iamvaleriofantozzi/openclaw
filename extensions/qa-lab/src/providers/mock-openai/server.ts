@@ -671,9 +671,8 @@ async function buildResponsesPayload(
     return buildToolCallEventsWithArgs("read", { path: "LOOP_STEADY.txt" });
   }
   if (
-    (QA_TOOL_SEARCH_PROMPT_RE.test(allInputText) ||
-      QA_TOOL_SEARCH_FAILURE_PROMPT_RE.test(allInputText)) &&
-    !hasCompletedToolOutput
+    QA_TOOL_SEARCH_PROMPT_RE.test(allInputText) ||
+    QA_TOOL_SEARCH_FAILURE_PROMPT_RE.test(allInputText)
   ) {
     const targetTool = extractToolSearchTarget(allInputText);
     const plannedArgs = targetTool
@@ -681,12 +680,22 @@ async function buildResponsesPayload(
       : {};
     if (
       targetTool &&
+      hasCompletedToolOutput &&
+      !toolOutput.includes("FAKE_PLUGIN_OK") &&
+      toolOutput.includes(targetTool) &&
+      hasDeclaredTool(body, "tool_call")
+    ) {
+      return buildToolCallEventsWithArgs("tool_call", { id: targetTool, args: plannedArgs });
+    }
+    if (
+      !hasCompletedToolOutput &&
+      targetTool &&
       findNamedToolDefinition(toolDeclarationBody, targetTool)?.type === "custom" &&
       typeof plannedArgs.input === "string"
     ) {
       return buildToolCallEventsWithArgs(targetTool, plannedArgs);
     }
-    if (targetTool && hasDeclaredTool(body, "tool_search_code")) {
+    if (!hasCompletedToolOutput && targetTool && hasDeclaredTool(body, "tool_search_code")) {
       return buildToolCallEventsWithArgs("tool_search_code", {
         code: [
           `const hits = await openclaw.tools.search(${JSON.stringify(targetTool)}, { limit: 1 });`,
@@ -696,7 +705,19 @@ async function buildResponsesPayload(
         ].join("\n"),
       });
     }
-    if (targetTool && (hasDeclaredTool(body, targetTool) || isQaToolSearchFixture(allInputText))) {
+    if (!hasCompletedToolOutput && targetTool && hasDeclaredTool(body, "tool_search")) {
+      return buildToolCallEventsWithArgs("tool_search", {
+        queries: [
+          { query: targetTool, limit: 1 },
+          { query: "large plugin tool catalog", limit: 1 },
+        ],
+      });
+    }
+    if (
+      !hasCompletedToolOutput &&
+      targetTool &&
+      (hasDeclaredTool(body, targetTool) || isQaToolSearchFixture(allInputText))
+    ) {
       return buildToolCallEventsWithArgs(targetTool, plannedArgs);
     }
   }
