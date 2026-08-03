@@ -216,7 +216,8 @@ export function readPluginSdkSurfaceBudgets(env = process.env) {
       // +45: restore typed session-catalog and tool-results exports promised to plugins.
       // +1: forwarding-routed approver-restricted native approval capability factory.
       // +1: shared inbound-event delivery correlation factory for channel plugins.
-      4825,
+      // +3: canonical ready, blocked, and stopped channel lifecycle patch factories.
+      4828,
       env,
     ),
     publicFunctionExports: readPluginSdkSurfaceBudgetEnv(
@@ -260,7 +261,8 @@ export function readPluginSdkSurfaceBudgets(env = process.env) {
       // +14: restore callable session-catalog and tool-results helpers promised to plugins.
       // +1: forwarding-routed approver-restricted native approval capability factory.
       // +1: shared inbound-event delivery correlation factory for channel plugins.
-      2902,
+      // +3: canonical ready, blocked, and stopped channel lifecycle patch factories.
+      2905,
       env,
     ),
     publicDeprecatedExports: readPluginSdkSurfaceBudgetEnv(
