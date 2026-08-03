@@ -24,7 +24,7 @@ const ALLOWED_PRODUCTION_IMPORTERS = [
   "src/auto-reply/reply/agent-runner-execution.ts",
   "src/auto-reply/reply/agent-runner-execution.types.ts",
   "src/gateway/server-methods/agent-run-admission-phase.ts",
-  "src/infra/agent-events.ts",
+  "src/infra/agent-run-registry.ts",
 ] as const;
 
 const FORBIDDEN_PUBLIC_ROOTS = [
