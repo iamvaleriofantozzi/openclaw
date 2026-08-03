@@ -377,6 +377,16 @@ export async function runPluginsDoctorCommand(opts: PluginDoctorOptions = {}): P
     isErroredConfigSelectedShadowDiagnostic({ entry, plugins: report.plugins }),
   );
   const compatibility = buildPluginCompatibilityNotices({ report });
+  const { collectRelevantDoctorPluginIds, listPluginDoctorConfigWarnings } =
+    await import("../plugins/doctor-contract-registry.js");
+  const ownedPluginWarnings = listPluginDoctorConfigWarnings({
+    config: sourceCfg,
+    pluginIds: collectRelevantDoctorPluginIds(sourceCfg),
+  }).map(({ path, message, fixHint }) =>
+    formatConfigIssueLines([{ path, message: [message, fixHint].filter(Boolean).join(" ") }]).join(
+      "\n",
+    ),
+  );
   const pluginConfigWarnings = new Set([
     ...formatConfigIssueLines(
       (configSnapshot?.warnings ?? []).filter(
@@ -389,6 +399,7 @@ export async function runPluginsDoctorCommand(opts: PluginDoctorOptions = {}): P
       autoRepairBlocked: isStalePluginAutoRepairBlocked(sourceCfg, process.env),
     }),
     ...collectConfiguredRuntimePluginWarnings({ cfg: sourceCfg, plugins: report.plugins }),
+    ...ownedPluginWarnings,
   ]);
   const hasInstallTreeIssues =
     errors.length > 0 || diags.length > 0 || shadowed.length > 0 || compatibility.length > 0;

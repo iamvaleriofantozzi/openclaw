@@ -5,6 +5,7 @@ import type {
   ConfigValidationIssue,
   OpenClawConfig,
 } from "../config/types.openclaw.js";
+import type { listPluginDoctorConfigWarnings } from "../plugins/doctor-contract-registry.js";
 import { createPluginRecord } from "../plugins/status.test-fixtures.js";
 import { withEnvAsync } from "../test-utils/env.js";
 import {
@@ -26,6 +27,9 @@ import {
 
 const workshopMocks = vi.hoisted(() => ({
   detectToolPolicyDiagnostic: vi.fn(),
+}));
+const pluginDoctorWarningMocks = vi.hoisted(() => ({
+  collect: vi.fn<typeof listPluginDoctorConfigWarnings>(() => []),
 }));
 
 const cleanDoctorMessage =
@@ -67,10 +71,17 @@ vi.mock("../skills/workshop/tool-policy-diagnostic.js", () => ({
   detectSkillWorkshopToolPolicyDiagnostic: workshopMocks.detectToolPolicyDiagnostic,
 }));
 
+vi.mock("../plugins/doctor-contract-registry.js", () => ({
+  collectRelevantDoctorPluginIds: () => ["codex"],
+  listPluginDoctorConfigWarnings: pluginDoctorWarningMocks.collect,
+}));
+
 describe("plugins cli list", () => {
   beforeEach(() => {
     resetPluginsCliTestState();
     workshopMocks.detectToolPolicyDiagnostic.mockReset();
+    pluginDoctorWarningMocks.collect.mockReset();
+    pluginDoctorWarningMocks.collect.mockReturnValue([]);
   });
 
   it("includes imported state in JSON output", async () => {
@@ -167,6 +178,28 @@ describe("plugins cli list", () => {
       expect(runtimeLogs).not.toContain(cleanDoctorMessage);
     },
   );
+
+  it.each([
+    { format: "human", args: [] },
+    { format: "JSON", args: ["--json"] },
+  ])("reports plugin-owned non-plugin-path warnings in $format output", async ({ args }) => {
+    buildPluginDiagnosticsReport.mockReturnValue({ plugins: [], diagnostics: [] });
+    pluginDoctorWarningMocks.collect.mockReturnValue([
+      {
+        pluginId: "codex",
+        path: "agents.defaults.models.openai/gpt-5.6-sol.params.serviceTier",
+        message: "Explicit native Codex route cannot reproduce serviceTier.",
+        fixHint: "Remove it or use the OpenClaw runtime.",
+      },
+    ]);
+
+    await runPluginsCommand(["plugins", "doctor", ...args]);
+
+    const output = runtimeLogs.join("\n");
+    expect(output).toContain("agents.defaults.models.openai/gpt-5.6-sol.params.serviceTier");
+    expect(output).toContain("Remove it or use the OpenClaw runtime.");
+    expect(output).not.toContain(cleanDoctorMessage);
+  });
 
   it("deduplicates plugin validation warnings while ignoring other config owners", async () => {
     const googleWarning = {

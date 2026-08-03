@@ -2,15 +2,22 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { clearHealthChecksForTest, registerHealthCheck } from "../flows/health-check-registry.js";
+import type { listPluginDoctorConfigWarnings } from "../plugins/doctor-contract-registry.js";
 import { runDoctorLintCli } from "./doctor-lint.js";
 
 const mocks = vi.hoisted(() => ({
   readConfigFileSnapshot: vi.fn(),
+  pluginWarnings: vi.fn<typeof listPluginDoctorConfigWarnings>(() => []),
 }));
 
 vi.mock("../config/config.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../config/config.js")>()),
   readConfigFileSnapshot: mocks.readConfigFileSnapshot,
+}));
+
+vi.mock("../plugins/doctor-contract-registry.js", () => ({
+  collectRelevantDoctorPluginIds: () => ["codex"],
+  listPluginDoctorConfigWarnings: mocks.pluginWarnings,
 }));
 
 const runtime = {
@@ -23,6 +30,8 @@ describe("runDoctorLintCli", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     clearHealthChecksForTest();
+    mocks.pluginWarnings.mockReset();
+    mocks.pluginWarnings.mockReturnValue([]);
   });
 
   it("bases exit code on the selected severity threshold", async () => {
@@ -220,6 +229,44 @@ describe("runDoctorLintCli", () => {
       // Explicit plugins.entries.codex.enabled=false blocks auto-repair, so the
       // hint names the manual action instead of promising doctor --fix.
       expect(payload.findings[0].fixHint).toContain("Enable plugins.entries.codex");
+    } finally {
+      stdout.mockRestore();
+    }
+  });
+
+  it("reports plugin-owned config warnings through structured lint", async () => {
+    mocks.readConfigFileSnapshot.mockResolvedValue({
+      exists: true,
+      valid: true,
+      config: {},
+      path: "/tmp/openclaw.json",
+    });
+    mocks.pluginWarnings.mockReturnValue([
+      {
+        pluginId: "codex",
+        path: "plugins.entries.codex.config.appServer.command",
+        message: "Custom Codex command bypasses the managed binary.",
+        fixHint: "Remove the override.",
+      },
+    ]);
+
+    const stdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    try {
+      const exitCode = await runDoctorLintCli(runtime, {
+        json: true,
+        onlyIds: ["core/doctor/final-config-validation"],
+      });
+      const payload = JSON.parse(String(stdout.mock.calls.at(-1)?.[0]));
+
+      expect(exitCode).toBe(1);
+      expect(payload.findings).toEqual([
+        expect.objectContaining({
+          checkId: "core/doctor/final-config-validation",
+          source: "codex",
+          path: "plugins.entries.codex.config.appServer.command",
+          fixHint: "Remove the override.",
+        }),
+      ]);
     } finally {
       stdout.mockRestore();
     }

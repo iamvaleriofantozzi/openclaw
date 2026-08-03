@@ -2,7 +2,6 @@
 import { asOptionalRecord as asMutableRecord } from "@openclaw/normalization-core/record-coerce";
 import { normalizeOptionalLowercaseString as normalizeString } from "@openclaw/normalization-core/string-coerce";
 import type { OpenClawConfig } from "../../../config/types.openclaw.js";
-import { detectWindowsSpawnCommandInlineArgs } from "../../../plugin-sdk/windows-spawn.js";
 import {
   canAutoMigrateLegacyLosslessCompaction,
   collectLegacyLosslessCompactionConfigs,
@@ -97,29 +96,6 @@ function formatDisabledCodexPluginWarning(params: {
   ].join("\n");
 }
 
-function collectCodexAppServerCommandWarnings(cfg: OpenClawConfig): string[] {
-  const plugins = asMutableRecord(cfg.plugins);
-  const entries = asMutableRecord(plugins?.entries);
-  const codex = asMutableRecord(entries?.codex);
-  const config = asMutableRecord(codex?.config);
-  const appServer = asMutableRecord(config?.appServer);
-  const command = typeof appServer?.command === "string" ? appServer.command.trim() : "";
-  if (!command) {
-    return [];
-  }
-  const inlineArgs = detectWindowsSpawnCommandInlineArgs(command);
-  if (!inlineArgs) {
-    return [];
-  }
-  return [
-    [
-      "- Codex app-server command override includes inline arguments.",
-      `- plugins.entries.codex.config.appServer.command: "${command}" starts with "${inlineArgs.executable}" and embeds "${inlineArgs.arguments}". The command field must be only the executable path.`,
-      "- Remove the override to use managed Codex startup, or move script/options to plugins.entries.codex.config.appServer.args.",
-    ].join("\n"),
-  ];
-}
-
 function collectCodexComputerUseWarnings(cfg: OpenClawConfig): string[] {
   const plugins = asMutableRecord(cfg.plugins);
   const entries = asMutableRecord(plugins?.entries);
@@ -208,7 +184,6 @@ export function collectCodexRouteWarnings(params: {
     });
   const warnings = [
     ...(blockedProviderPlan.warning ? [blockedProviderPlan.warning] : []),
-    ...collectCodexAppServerCommandWarnings(params.cfg),
     ...collectCodexComputerUseWarnings(params.cfg),
   ];
   if (hits.length > 0) {

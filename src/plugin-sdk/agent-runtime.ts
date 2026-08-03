@@ -17,7 +17,6 @@ export {
   resolveSessionAgentIds,
   setAgentEffectiveModelPrimary,
 } from "../agents/agent-scope.js";
-
 export { DEFAULT_PROVIDER } from "../agents/defaults.js";
 // Consumed by the codex plugin's app-server usage surface.
 export { CODEX_APP_SERVER_AUTH_MARKER } from "../agents/model-auth-markers.js";

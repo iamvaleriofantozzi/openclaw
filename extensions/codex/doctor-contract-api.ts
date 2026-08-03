@@ -1,9 +1,16 @@
+import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 /**
  * Doctor contract hooks for Codex plugin config migrations and session-route
  * ownership warnings.
  */
-import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
+import {
+  collectAuthoredProviderRequestParams,
+  collectEffectiveConfiguredModelRoutes,
+  resolveModelRuntimePolicy,
+} from "openclaw/plugin-sdk/runtime-doctor";
 import type { DoctorSessionRouteStateOwner } from "openclaw/plugin-sdk/runtime-doctor";
+import { detectWindowsSpawnCommandInlineArgs } from "openclaw/plugin-sdk/windows-spawn";
+import { CODEX_APP_SERVER_VERSION } from "./src/app-server/version.js";
 
 type LegacyConfigRule = {
   path: string[];
@@ -37,6 +44,81 @@ function hasLegacyPluginDestructivePolicy(value: unknown): boolean {
 
 function hasRetiredOnFailureApprovalPolicy(value: unknown): boolean {
   return asRecord(value)?.approvalPolicy === "on-failure";
+}
+
+type CodexConfigWarning = {
+  path: string;
+  message: string;
+  fixHint?: string;
+};
+
+function collectAuthoredRequestParamWarnings(cfg: OpenClawConfig): CodexConfigWarning[] {
+  const warnings: CodexConfigWarning[] = [];
+  const seen = new Set<string>();
+  for (const route of collectEffectiveConfiguredModelRoutes({ cfg }).routes) {
+    const runtimeId = resolveModelRuntimePolicy({
+      config: cfg,
+      provider: route.provider,
+      modelId: route.modelId,
+      agentId: route.agentId,
+    }).policy?.id;
+    if (
+      route.provider.trim().toLowerCase() !== "openai" ||
+      runtimeId?.trim().toLowerCase() !== "codex"
+    ) {
+      continue;
+    }
+    for (const requestParam of collectAuthoredProviderRequestParams({
+      config: cfg,
+      provider: route.provider,
+      modelId: route.modelId,
+      agentId: route.agentId,
+    })) {
+      if (seen.has(requestParam.path)) {
+        continue;
+      }
+      seen.add(requestParam.path);
+      warnings.push({
+        path: requestParam.path,
+        message:
+          `Explicit native Codex route ${route.path} cannot reproduce authored request parameter ` +
+          `"${requestParam.key}" for ${route.provider}/${route.modelId}.`,
+        fixHint:
+          'Remove this parameter or set the affected route\'s agentRuntime.id to "openclaw". ' +
+          "Keep model-scoped params.fastMode when native priority mode is intended.",
+      });
+    }
+  }
+  return warnings;
+}
+
+function collectCustomCommandWarning(cfg: OpenClawConfig): CodexConfigWarning[] {
+  const pluginConfig = asRecord(asRecord(cfg.plugins?.entries?.codex)?.config);
+  const appServer = asRecord(pluginConfig?.appServer);
+  const command = typeof appServer?.command === "string" ? appServer.command.trim() : "";
+  if (!command) {
+    return [];
+  }
+  const inlineArgs = detectWindowsSpawnCommandInlineArgs(command);
+  return [
+    {
+      path: "plugins.entries.codex.config.appServer.command",
+      message:
+        `Custom Codex app-server command bypasses the managed ${CODEX_APP_SERVER_VERSION} binary. ` +
+        "Doctor did not execute the configured command or determine its version.",
+      fixHint:
+        (inlineArgs
+          ? `Set command to only "${inlineArgs.executable}" and move "${inlineArgs.arguments}" to appServer.args; then remove`
+          : "Remove") +
+        ` the command override to use managed Codex ${CODEX_APP_SERVER_VERSION}, ` +
+        `or explicitly verify and update the custom binary to exactly ${CODEX_APP_SERVER_VERSION}.`,
+    },
+  ];
+}
+
+/** Static Codex compatibility warnings for explicit diagnostic surfaces. */
+export function collectConfigWarnings({ cfg }: { cfg: OpenClawConfig }): CodexConfigWarning[] {
+  return [...collectAuthoredRequestParamWarnings(cfg), ...collectCustomCommandWarning(cfg)];
 }
 
 /** Legacy Codex config keys that doctor should report or repair. */

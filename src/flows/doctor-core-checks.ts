@@ -1175,13 +1175,32 @@ const finalConfigValidationCheck: HealthCheck = {
   kind: "core",
   description: "Active openclaw.jsonc parses and conforms to the config schema.",
   source: "doctor",
-  async detect() {
+  async detect(ctx) {
     const { readConfigFileSnapshot } = await import("../config/config.js");
     const snap = await readConfigFileSnapshot({ observe: false });
-    if (!snap.exists || snap.valid) {
+    if (!snap.exists) {
       return [];
     }
-    return configValidationIssuesToHealthFindings(snap.issues);
+    if (!snap.valid) {
+      return configValidationIssuesToHealthFindings(snap.issues);
+    }
+    const { collectRelevantDoctorPluginIds, listPluginDoctorConfigWarnings } =
+      await import("../plugins/doctor-contract-registry.js");
+    return listPluginDoctorConfigWarnings({
+      config: snap.config,
+      ...(ctx.env ? { env: ctx.env } : {}),
+      ...(ctx.cwd ? { workspaceDir: ctx.cwd } : {}),
+      pluginIds: collectRelevantDoctorPluginIds(snap.config),
+    }).map((warning): HealthFinding => {
+      const finding = {
+        checkId: FINAL_CONFIG_VALIDATION_CHECK_ID,
+        severity: "warning",
+        source: warning.pluginId,
+        path: warning.path,
+        message: warning.message,
+      } satisfies HealthFinding;
+      return warning.fixHint ? Object.assign(finding, { fixHint: warning.fixHint }) : finding;
+    });
   },
 };
 

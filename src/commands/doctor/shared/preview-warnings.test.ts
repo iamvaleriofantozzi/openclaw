@@ -71,6 +71,9 @@ const staleAuthOrderState = vi.hoisted(() => ({
 const activeToolSchemaState = vi.hoisted(() => ({
   warnings: [] as string[],
 }));
+const pluginConfigWarningState = vi.hoisted(() => ({
+  warnings: [] as Array<{ pluginId: string; path: string; message: string; fixHint?: string }>,
+}));
 
 const commandSecretState = vi.hoisted(() => ({
   targetIds: new Set<string>(),
@@ -322,6 +325,11 @@ vi.mock("./codex-route-warnings.js", () => ({
   collectCodexRouteWarnings: vi.fn(() => []),
 }));
 
+vi.mock("../../../plugins/doctor-contract-registry.js", () => ({
+  collectRelevantDoctorPluginIds: () => ["codex"],
+  listPluginDoctorConfigWarnings: () => pluginConfigWarningState.warnings,
+}));
+
 async function useRealCodexRouteWarningsOnce(): Promise<void> {
   const mocked = await import("./codex-route-warnings.js");
   const actual = await vi.importActual<typeof import("./codex-route-warnings.js")>(
@@ -389,6 +397,7 @@ describe("doctor preview warnings", () => {
     staleOAuthShadowState.warnings = [];
     staleAuthOrderState.warnings = [];
     activeToolSchemaState.warnings = [];
+    pluginConfigWarningState.warnings = [];
     commandSecretState.targetIds = new Set<string>();
     commandSecretState.resolvedConfig = undefined;
     commandSecretState.diagnostics = [];
@@ -403,6 +412,29 @@ describe("doctor preview warnings", () => {
       await fs.rm(root, { recursive: true, force: true });
     }
     tempRoots.clear();
+  });
+
+  it("renders plugin-owned config warnings during normal doctor preview", async () => {
+    pluginConfigWarningState.warnings = [
+      {
+        pluginId: "codex",
+        path: "plugins.entries.codex.config.appServer.command",
+        message: "Custom Codex command bypasses the managed binary.",
+        fixHint: "Remove the override.",
+      },
+    ];
+
+    const warnings = await collectDoctorPreviewWarnings({
+      cfg: { plugins: { entries: { codex: {} } } },
+      doctorFixCommand: "openclaw doctor --fix",
+    });
+
+    expect(warnings).toContain(
+      [
+        "- plugins.entries.codex.config.appServer.command: Custom Codex command bypasses the managed binary.",
+        "- Remove the override.",
+      ].join("\n"),
+    );
   });
 
   it("routes personal Codex asset notices to info instead of warnings", async () => {

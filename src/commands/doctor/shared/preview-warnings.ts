@@ -797,6 +797,21 @@ export async function collectDoctorPreviewNotes(params: {
     }),
   );
 
+  const { collectRelevantDoctorPluginIds, listPluginDoctorConfigWarnings } =
+    await import("../../../plugins/doctor-contract-registry.js");
+  warnings.push(
+    ...listPluginDoctorConfigWarnings({
+      config: params.cfg,
+      env,
+      pluginIds: collectRelevantDoctorPluginIds(params.cfg),
+    }).map((warning) =>
+      [
+        `- ${warning.path}: ${warning.message}`,
+        ...(warning.fixHint ? [`- ${warning.fixHint}`] : []),
+      ].join("\n"),
+    ),
+  );
+
   if (hasPluginConfig) {
     const { collectContextEngineHostCompatibilityWarnings } =
       await import("./context-engine-host-compat.js");

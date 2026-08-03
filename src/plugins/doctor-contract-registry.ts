@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { normalizeProviderId } from "@openclaw/model-catalog-core/provider-id";
 import { asNullableRecord } from "@openclaw/normalization-core/record-coerce";
 import { normalizeTrimmedStringList } from "@openclaw/normalization-core/string-normalization";
+import { collectConfiguredAgentHarnessRuntimes } from "../agents/harness-runtimes.js";
 import type { LegacyConfigRule } from "../config/legacy.shared.js";
 import type { OpenClawConfig } from "../config/types.js";
 import type {
@@ -24,11 +25,24 @@ const RUNNING_FROM_BUILT_ARTIFACT =
   CURRENT_MODULE_PATH.includes(`${path.sep}dist-runtime${path.sep}`);
 
 type PluginDoctorContractModule = {
+  collectConfigWarnings?: unknown;
   legacyConfigRules?: unknown;
   normalizeCompatibilityConfig?: unknown;
   resolveSessionStoreAgentIds?: unknown;
   sessionRouteStateOwners?: unknown;
   stateMigrations?: unknown;
+};
+
+type PluginDoctorConfigWarningCollector = (params: {
+  cfg: OpenClawConfig;
+  env: NodeJS.ProcessEnv;
+}) => readonly unknown[];
+
+type PluginDoctorConfigWarning = {
+  pluginId: string;
+  path: string;
+  message: string;
+  fixHint?: string;
 };
 
 type PluginDoctorCompatibilityMutation = {
@@ -46,6 +60,7 @@ type PluginDoctorSessionStoreAgentIdsResolver = (params: {
 
 type PluginDoctorContractEntry = {
   pluginId: string;
+  collectConfigWarnings?: PluginDoctorConfigWarningCollector;
   rules: LegacyConfigRule[];
   normalizeCompatibilityConfig?: PluginDoctorCompatibilityNormalizer;
   resolveSessionStoreAgentIds?: PluginDoctorSessionStoreAgentIdsResolver;
@@ -140,6 +155,22 @@ function coerceLegacyConfigRules(value: unknown): LegacyConfigRule[] {
     const candidate = entry as { path?: unknown; message?: unknown };
     return Array.isArray(candidate.path) && typeof candidate.message === "string";
   }) as LegacyConfigRule[];
+}
+
+function coerceConfigWarningCollector(
+  value: unknown,
+): PluginDoctorConfigWarningCollector | undefined {
+  return typeof value === "function" ? (value as PluginDoctorConfigWarningCollector) : undefined;
+}
+
+function coerceConfigWarning(value: unknown): Omit<PluginDoctorConfigWarning, "pluginId"> | null {
+  const record = asNullableRecord(value);
+  const warningPath = typeof record?.path === "string" ? record.path.trim() : "";
+  const message = typeof record?.message === "string" ? record.message.trim() : "";
+  const fixHint = typeof record?.fixHint === "string" ? record.fixHint.trim() : "";
+  return warningPath && message
+    ? { path: warningPath, message, ...(fixHint ? { fixHint } : {}) }
+    : null;
 }
 
 function coerceNormalizeCompatibilityConfig(
@@ -303,6 +334,12 @@ export function collectRelevantDoctorPluginIds(raw: unknown): string[] {
     ids.add("elevenlabs");
   }
 
+  for (const runtimeId of collectConfiguredAgentHarnessRuntimes(root as OpenClawConfig, {
+    includeImplicitRuntimePreferences: false,
+  })) {
+    ids.add(runtimeId);
+  }
+
   return [...ids].toSorted();
 }
 
@@ -370,6 +407,10 @@ function loadPluginDoctorContractEntry(
     (mod as { default?: PluginDoctorContractModule }).default?.legacyConfigRules ??
       mod.legacyConfigRules,
   );
+  const collectConfigWarnings = coerceConfigWarningCollector(
+    mod.collectConfigWarnings ??
+      (mod as { default?: PluginDoctorContractModule }).default?.collectConfigWarnings,
+  );
   const normalizeCompatibilityConfig = coerceNormalizeCompatibilityConfig(
     mod.normalizeCompatibilityConfig ??
       (mod as { default?: PluginDoctorContractModule }).default?.normalizeCompatibilityConfig,
@@ -388,6 +429,7 @@ function loadPluginDoctorContractEntry(
   );
   if (
     rules.length === 0 &&
+    !collectConfigWarnings &&
     !normalizeCompatibilityConfig &&
     !resolveSessionStoreAgentIds &&
     sessionRouteStateOwners.length === 0 &&
@@ -397,12 +439,58 @@ function loadPluginDoctorContractEntry(
   }
   return {
     pluginId: record.id,
+    collectConfigWarnings,
     rules,
     normalizeCompatibilityConfig,
     resolveSessionStoreAgentIds,
     sessionRouteStateOwners,
     stateMigrations,
   };
+}
+
+/** Collects static, non-mutating diagnostics owned by relevant plugin contracts. */
+export function listPluginDoctorConfigWarnings(params: {
+  config: OpenClawConfig;
+  workspaceDir?: string;
+  env?: NodeJS.ProcessEnv;
+  pluginIds?: readonly string[];
+}): PluginDoctorConfigWarning[] {
+  const env = params.env ?? process.env;
+  const warnings: PluginDoctorConfigWarning[] = [];
+  const seen = new Set<string>();
+  for (const entry of resolvePluginDoctorContracts({
+    config: params.config,
+    env,
+    ...(params.workspaceDir !== undefined ? { workspaceDir: params.workspaceDir } : {}),
+    ...(params.pluginIds !== undefined ? { pluginIds: params.pluginIds } : {}),
+  })) {
+    let collected: readonly unknown[];
+    try {
+      const result = entry.collectConfigWarnings?.({ cfg: params.config, env });
+      collected = Array.isArray(result) ? result : [];
+    } catch {
+      // A plugin-owned diagnostic must never make config inspection fail.
+      continue;
+    }
+    for (const value of collected) {
+      const warning = coerceConfigWarning(value);
+      if (!warning) {
+        continue;
+      }
+      const key = `${entry.pluginId}\0${warning.path}\0${warning.message}\0${warning.fixHint ?? ""}`;
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      warnings.push({ pluginId: entry.pluginId, ...warning });
+    }
+  }
+  return warnings.toSorted(
+    (left, right) =>
+      left.pluginId.localeCompare(right.pluginId) ||
+      left.path.localeCompare(right.path) ||
+      left.message.localeCompare(right.message),
+  );
 }
 
 function resolvePluginDoctorContracts(params?: {

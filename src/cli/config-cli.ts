@@ -354,7 +354,16 @@ async function runConfigValidate(opts: { json?: boolean; runtime?: RuntimeEnv } 
       runtime.exit(1);
       return;
     }
-    const warnings = normalizeConfigIssues(snapshot.warnings);
+    const { collectRelevantDoctorPluginIds, listPluginDoctorConfigWarnings } =
+      await import("../plugins/doctor-contract-registry.js");
+    const pluginWarnings = listPluginDoctorConfigWarnings({
+      config: snapshot.config,
+      pluginIds: collectRelevantDoctorPluginIds(snapshot.config),
+    }).map(({ path, message, fixHint }) => ({
+      path,
+      message: [message, fixHint].filter(Boolean).join(" "),
+    }));
+    const warnings = normalizeConfigIssues([...snapshot.warnings, ...pluginWarnings]);
     if (opts.json) {
       writeRuntimeJson(runtime, { valid: true, path: outputPath, warnings }, 0);
     } else {

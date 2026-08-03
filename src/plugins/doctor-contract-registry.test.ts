@@ -18,6 +18,7 @@ let clearPluginDoctorContractRegistryCache: typeof import("./doctor-contract-reg
 let collectRelevantDoctorPluginIds: typeof import("./doctor-contract-registry.js").collectRelevantDoctorPluginIds;
 let collectRelevantDoctorPluginIdsForTouchedPaths: typeof import("./doctor-contract-registry.js").collectRelevantDoctorPluginIdsForTouchedPaths;
 let listPluginDoctorLegacyConfigRules: typeof import("./doctor-contract-registry.js").listPluginDoctorLegacyConfigRules;
+let listPluginDoctorConfigWarnings: typeof import("./doctor-contract-registry.js").listPluginDoctorConfigWarnings;
 let listPluginDoctorSessionRouteStateOwners: typeof import("./doctor-contract-registry.js").listPluginDoctorSessionRouteStateOwners;
 let listPluginDoctorSessionStoreAgentIds: typeof import("./doctor-contract-registry.js").listPluginDoctorSessionStoreAgentIds;
 let setPluginDoctorContractRegistryModuleLoaderFactoryForTest:
@@ -49,6 +50,7 @@ describe("doctor-contract-registry module loader", () => {
       applyPluginDoctorCompatibilityMigrations,
       collectRelevantDoctorPluginIds,
       collectRelevantDoctorPluginIdsForTouchedPaths,
+      listPluginDoctorConfigWarnings,
       listPluginDoctorLegacyConfigRules,
       listPluginDoctorSessionRouteStateOwners,
       listPluginDoctorSessionStoreAgentIds,
@@ -243,6 +245,62 @@ describe("doctor-contract-registry module loader", () => {
     ).toEqual(["cards", "voice"]);
   });
 
+  it("loads, scopes, and deduplicates plugin-owned config warnings", () => {
+    const pluginRoot = makeTempDir();
+    fs.writeFileSync(
+      path.join(pluginRoot, "doctor-contract-api.cjs"),
+      [
+        "module.exports = {",
+        "  collectConfigWarnings: ({ cfg }) => [",
+        "    { path: 'plugins.entries.demo.config.command', message: `custom ${cfg.plugins.entries.demo.config.command}`, fixHint: 'remove it' },",
+        "    { path: 'plugins.entries.demo.config.command', message: `custom ${cfg.plugins.entries.demo.config.command}`, fixHint: 'remove it' },",
+        "    { path: '', message: 'ignored' },",
+        "  ],",
+        "};",
+      ].join("\n"),
+      "utf-8",
+    );
+    mocks.loadPluginManifestRegistry.mockReturnValue({
+      plugins: [{ id: "demo", rootDir: pluginRoot, channels: [], providers: [] }],
+      diagnostics: [],
+    });
+    const config = {
+      plugins: { entries: { demo: { config: { command: "/opt/demo" } } } },
+    };
+
+    expect(listPluginDoctorConfigWarnings({ config, env: {}, pluginIds: ["demo"] })).toEqual([
+      {
+        pluginId: "demo",
+        path: "plugins.entries.demo.config.command",
+        message: "custom /opt/demo",
+        fixHint: "remove it",
+      },
+    ]);
+    expect(listPluginDoctorConfigWarnings({ config, env: {}, pluginIds: ["other"] })).toEqual([]);
+  });
+
+  it.each([
+    {
+      name: "throwing",
+      source: "module.exports = { collectConfigWarnings: () => { throw new Error('boom'); } };\n",
+    },
+    {
+      name: "malformed",
+      source: "module.exports = { collectConfigWarnings: () => ({ message: 'not an array' }) };\n",
+    },
+  ])("isolates a $name plugin config warning collector", ({ source }) => {
+    const pluginRoot = makeTempDir();
+    fs.writeFileSync(path.join(pluginRoot, "doctor-contract-api.cjs"), source, "utf-8");
+    mocks.loadPluginManifestRegistry.mockReturnValue({
+      plugins: [{ id: "demo", rootDir: pluginRoot, channels: [], providers: [] }],
+      diagnostics: [],
+    });
+
+    expect(listPluginDoctorConfigWarnings({ config: {}, env: {}, pluginIds: ["demo"] })).toEqual(
+      [],
+    );
+  });
+
   it("loads multiple bundled CLI route-state owners from doctor contract modules", () => {
     const anthropicRoot = makeTempDir();
     const googleRoot = makeTempDir();
@@ -391,6 +449,20 @@ describe("doctor-contract-registry module loader", () => {
         },
       }),
     ).toEqual(["ollama-cloud"]);
+  });
+
+  it("collects explicit agent harness runtime ids for doctor diagnostics", () => {
+    expect(
+      collectRelevantDoctorPluginIds({
+        agents: {
+          defaults: {
+            models: {
+              "openai/gpt-5.6": { agentRuntime: { id: "codex" } },
+            },
+          },
+        },
+      }),
+    ).toContain("codex");
   });
 
   it("collects provider ids from media model entries", () => {

@@ -5,6 +5,7 @@ import path from "node:path";
 import { Command } from "commander";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ConfigFileSnapshot, OpenClawConfig } from "../config/types.js";
+import type { listPluginDoctorConfigWarnings } from "../plugins/doctor-contract-registry.js";
 import type { PluginManifestRecord, PluginManifestRegistry } from "../plugins/manifest-registry.js";
 import type { PluginMetadataSnapshot } from "../plugins/plugin-metadata-snapshot.js";
 import type { ConfigSetDryRunResult } from "./config-set-dryrun.js";
@@ -32,6 +33,9 @@ const mockWriteConfigFile = vi.fn<
 const mockResolveSecretRefValue = vi.fn();
 const mockCheckTouchedTextModelRefs = vi.fn();
 const mockReadBestEffortRuntimeConfigSchema = vi.fn();
+const mockPluginDoctorWarnings = vi.hoisted(() =>
+  vi.fn<typeof listPluginDoctorConfigWarnings>(() => []),
+);
 const mockLoadPluginMetadataSnapshot = vi.fn((_configForTest: unknown) =>
   createPluginMetadataSnapshot(),
 );
@@ -138,6 +142,11 @@ vi.mock("../plugins/plugin-metadata-snapshot.js", () => ({
 
 vi.mock("../plugins/bundled-plugin-metadata.js", () => ({
   listBundledPluginMetadata: () => [],
+}));
+
+vi.mock("../plugins/doctor-contract-registry.js", () => ({
+  collectRelevantDoctorPluginIds: () => ["codex"],
+  listPluginDoctorConfigWarnings: mockPluginDoctorWarnings,
 }));
 
 vi.mock("../secrets/channel-contract-api.js", () => ({
@@ -512,6 +521,8 @@ describe("config cli", () => {
     mockReadConfigFileSnapshot.mockResolvedValue(buildSnapshot({ resolved: {}, config: {} }));
     resetRuntimeCapture();
     mockLoadPluginMetadataSnapshot.mockReturnValue(createPluginMetadataSnapshot());
+    mockPluginDoctorWarnings.mockReset();
+    mockPluginDoctorWarnings.mockReturnValue([]);
     mockReadBestEffortRuntimeConfigSchema.mockResolvedValue({
       schema: {
         $schema: "http://json-schema.org/draft-07/schema#",
@@ -1459,6 +1470,27 @@ describe("config cli", () => {
       expectLogIncludes("Config valid:");
       expectLogIncludes("channels.mattermost.allowFrom");
       expectLogIncludes("all DMs will be dropped");
+    });
+
+    it.each([
+      { name: "human", args: [] },
+      { name: "JSON", args: ["--json"] },
+    ])("includes plugin-owned diagnostics in $name output", async ({ args }) => {
+      setGatewaySnapshot();
+      mockPluginDoctorWarnings.mockReturnValue([
+        {
+          pluginId: "codex",
+          path: "agents.defaults.models.openai/gpt-5.6-sol.params.serviceTier",
+          message: "Explicit native Codex route cannot reproduce serviceTier.",
+          fixHint: "Remove it or use the OpenClaw runtime.",
+        },
+      ]);
+
+      await runConfigCommand(["config", "validate", ...args]);
+
+      const output = mockLog.mock.calls.map((call) => String(call[0])).join("\n");
+      expect(output).toContain("agents.defaults.models.openai/gpt-5.6-sol.params.serviceTier");
+      expect(output).toContain("Remove it or use the OpenClaw runtime.");
     });
 
     it("prints issues and exits 1 when config is invalid", async () => {

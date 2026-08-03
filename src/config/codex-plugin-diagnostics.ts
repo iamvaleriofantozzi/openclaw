@@ -1,5 +1,4 @@
 // Builds diagnostics for Codex plugin config and provider wiring.
-import { collectConfiguredModelRefs } from "@openclaw/model-catalog-core/configured-model-refs";
 import { parseModelCatalogRef } from "@openclaw/model-catalog-core/model-catalog-refs";
 import { normalizeProviderId } from "@openclaw/model-catalog-core/provider-id";
 import { normalizeLowercaseStringOrEmpty } from "@openclaw/normalization-core/string-coerce";
@@ -7,25 +6,10 @@ import {
   isDefaultAgentRuntimeId,
   normalizeOptionalAgentRuntimeId,
 } from "../agents/agent-runtime-id.js";
-import {
-  listAgentIds,
-  resolveAgentConfig,
-  resolveAgentEffectiveModelPrimary,
-  resolveAgentModelFallbacksOverride,
-  resolveEffectiveModelFallbacks,
-} from "../agents/agent-scope.js";
+import { listAgentIds } from "../agents/agent-scope.js";
+import { collectEffectiveConfiguredModelRoutes } from "../agents/configured-model-routes.js";
 import { resolveModelRuntimePolicy } from "../agents/model-runtime-policy.js";
-import {
-  resolveDefaultModelForAgent,
-  resolveSubagentConfiguredModelSelection,
-} from "../agents/model-selection-config.js";
-import {
-  buildModelAliasIndex,
-  resolveModelRefFromString,
-} from "../agents/model-selection-shared.js";
 import { resolveOpenAIImplicitAgentRuntime } from "../agents/openai-routing.js";
-import { normalizeAgentId } from "../routing/session-key.js";
-import { resolveAgentModelFallbackValues } from "./model-input.js";
 import type { OpenClawConfig } from "./types.openclaw.js";
 
 const CODEX_PLUGIN_ID = "codex";
@@ -92,84 +76,6 @@ export function configuredModelRouteNeedsCodex(params: {
   });
 }
 
-function resolveEffectiveSelectedModelRefs(params: { cfg: OpenClawConfig; agentId: string }): {
-  complete: boolean;
-  values: ReadonlySet<string>;
-} {
-  const { cfg, agentId } = params;
-  const mainPrimaryRaw = resolveAgentEffectiveModelPrimary(cfg, agentId);
-  const mainFallbacks =
-    resolveAgentModelFallbacksOverride(cfg, agentId) ??
-    resolveAgentModelFallbackValues(cfg.agents?.defaults?.model);
-  const subagentPrimaryRaw =
-    resolveSubagentConfiguredModelSelection({ cfg, agentId }) ?? mainPrimaryRaw;
-  const subagentFallbacks =
-    resolveEffectiveModelFallbacks({
-      cfg,
-      agentId,
-      sessionKey: `agent:${agentId}:subagent:codex-diagnostic`,
-      hasSessionModelOverride: true,
-      modelOverrideSource: "auto",
-    }) ?? [];
-  const values = new Set<string>();
-  for (const raw of [mainPrimaryRaw, ...mainFallbacks, subagentPrimaryRaw, ...subagentFallbacks]) {
-    const value = raw?.trim();
-    if (value) {
-      values.add(value);
-    }
-  }
-  return {
-    complete: Boolean(mainPrimaryRaw?.trim() && subagentPrimaryRaw?.trim()),
-    values,
-  };
-}
-
-function configuredRefTargetsAgent(params: {
-  cfg: OpenClawConfig;
-  sourceConfigBeforeMigrations?: OpenClawConfig;
-  path: string;
-  agentId: string;
-}): boolean {
-  const match = /^agents\.list\.(\d+)\./.exec(params.path);
-  if (match) {
-    const entry = (params.sourceConfigBeforeMigrations ?? params.cfg).agents?.list?.[
-      Number(match[1])
-    ];
-    return Boolean(entry && normalizeAgentId(entry.id) === params.agentId);
-  }
-  const keyedMatch = /^agents\.entries\.([^.]+)\./.exec(params.path);
-  return !keyedMatch || normalizeAgentId(keyedMatch[1] ?? "") === params.agentId;
-}
-
-function configuredRefIsEffectiveForAgent(params: {
-  cfg: OpenClawConfig;
-  sourceConfigBeforeMigrations?: OpenClawConfig;
-  path: string;
-  value: string;
-  agentId: string;
-  selectedModelRefs: ReadonlySet<string>;
-}): boolean {
-  if (!configuredRefTargetsAgent(params)) {
-    return false;
-  }
-  // Defaults may be shadowed by per-agent main/subagent selections. Keep only
-  // refs the runtime's inheritance rules leave reachable for this agent.
-  if (/^agents\.(?:defaults|list\.\d+)\.(?:model|subagents\.model)(?:\.|$)/.test(params.path)) {
-    return params.selectedModelRefs.has(params.value);
-  }
-  const agent = resolveAgentConfig(params.cfg, params.agentId);
-  if (params.path.endsWith(".heartbeat.model")) {
-    const heartbeat =
-      agent?.heartbeat?.model?.trim() || params.cfg.agents?.defaults?.heartbeat?.model?.trim();
-    return heartbeat === params.value;
-  }
-  if (params.path.endsWith(".utilityModel")) {
-    const utilityModel = (agent?.utilityModel ?? params.cfg.agents?.defaults?.utilityModel)?.trim();
-    return utilityModel === params.value;
-  }
-  return true;
-}
-
 function configuredProviderPoliciesNeedCodex(
   cfg: OpenClawConfig,
   env: NodeJS.ProcessEnv,
@@ -221,55 +127,22 @@ function configuredModelRefsNeedCodex(params: {
   cfg: OpenClawConfig;
   sourceConfigBeforeMigrations?: OpenClawConfig;
   env: NodeJS.ProcessEnv;
-  agentIds: string[];
 }): { complete: boolean; needsCodex: boolean } {
-  const refs = collectConfiguredModelRefs(params.sourceConfigBeforeMigrations ?? params.cfg);
-  let complete = true;
-  for (const agentId of params.agentIds) {
-    const selected = resolveEffectiveSelectedModelRefs({ cfg: params.cfg, agentId });
-    complete &&= selected.complete;
-    const primary = resolveDefaultModelForAgent({
-      cfg: params.cfg,
-      agentId,
-      manifestPlugins: [],
-    });
-    const aliasIndex = buildModelAliasIndex({
-      cfg: params.cfg,
-      defaultProvider: primary.provider,
-      manifestPlugins: [],
-    });
-    for (const ref of refs) {
-      if (
-        !configuredRefIsEffectiveForAgent({
-          cfg: params.cfg,
-          sourceConfigBeforeMigrations: params.sourceConfigBeforeMigrations,
-          path: ref.path,
-          value: ref.value,
-          agentId,
-          selectedModelRefs: selected.values,
-        })
-      ) {
-        continue;
-      }
-      const resolved = resolveModelRefFromString({
+  const configured = collectEffectiveConfiguredModelRoutes({
+    cfg: params.cfg,
+    sourceConfigBeforeMigrations: params.sourceConfigBeforeMigrations,
+  });
+  return {
+    complete: configured.complete,
+    needsCodex: configured.routes.some((route) =>
+      configuredModelRouteNeedsCodex({
         cfg: params.cfg,
-        raw: ref.value,
-        defaultProvider: primary.provider,
-        aliasIndex,
-        allowManifestNormalization: false,
-      });
-      const route = resolved
-        ? { provider: resolved.ref.provider, modelId: resolved.ref.model }
-        : undefined;
-      if (
-        route &&
-        configuredModelRouteNeedsCodex({ cfg: params.cfg, env: params.env, agentId, route })
-      ) {
-        return { complete, needsCodex: true };
-      }
-    }
-  }
-  return { complete, needsCodex: false };
+        env: params.env,
+        agentId: route.agentId,
+        route,
+      }),
+    ),
+  };
 }
 
 function defaultOpenAiRouteNeedsCodex(
@@ -296,7 +169,6 @@ function configNeedsCodexForOpenAi(
   const configuredRefs = configuredModelRefsNeedCodex({
     cfg,
     env,
-    agentIds,
     sourceConfigBeforeMigrations,
   });
   if (configuredRefs.needsCodex) {

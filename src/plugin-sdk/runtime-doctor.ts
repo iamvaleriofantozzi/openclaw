@@ -5,6 +5,15 @@ import { asObjectRecord } from "../config/channel-compat-normalization.js";
 import type { CompatMutationResult } from "../config/channel-compat-normalization.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 
+export {
+  collectEffectiveConfiguredModelRoutes,
+  type EffectiveConfiguredModelRoute,
+} from "../agents/configured-model-routes.js";
+export {
+  collectAuthoredProviderRequestParams,
+  type AuthoredProviderRequestParam,
+} from "../agents/model-extra-params.js";
+export { resolveModelRuntimePolicy } from "../agents/model-runtime-policy.js";
 export { collectProviderDangerousNameMatchingScopes } from "../config/dangerous-name-matching.js";
 export { defineChannelAliasMigration } from "../config/channel-alias-migration.js";
 export type {

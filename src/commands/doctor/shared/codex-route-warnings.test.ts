@@ -348,32 +348,6 @@ describe("collectCodexRouteWarnings", () => {
     expect(result.cfg.agents?.list?.[0]?.models?.["openai-codex/gpt-5.4"]).toBeUndefined();
   });
 
-  it("warns when Codex app-server command includes inline arguments", () => {
-    const warnings = collectCodexRouteWarnings({
-      plugins: {
-        entries: {
-          codex: {
-            enabled: true,
-            config: {
-              appServer: {
-                command:
-                  "node C:\\Users\\me\\.openclaw\\npm\\node_modules\\@openai\\codex\\bin\\codex.js",
-              },
-            },
-          },
-        },
-      },
-    });
-
-    expect(warnings).toStrictEqual([
-      [
-        "- Codex app-server command override includes inline arguments.",
-        '- plugins.entries.codex.config.appServer.command: "node C:\\Users\\me\\.openclaw\\npm\\node_modules\\@openai\\codex\\bin\\codex.js" starts with "node" and embeds "C:\\Users\\me\\.openclaw\\npm\\node_modules\\@openai\\codex\\bin\\codex.js". The command field must be only the executable path.',
-        "- Remove the override to use managed Codex startup, or move script/options to plugins.entries.codex.config.appServer.args.",
-      ].join("\n"),
-    ]);
-  });
-
   it("warns when Codex runtime routes are configured while the Codex plugin is disabled", () => {
     const warnings = collectCodexRouteWarnings({
       plugins: DISABLED_CODEX_PLUGIN_CONFIG,
