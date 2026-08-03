@@ -1,14 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 import {
-  claimAgentRunContext,
   getAgentEventLifecycleGeneration,
-  registerAgentRunContext,
   resetAgentEventsForTest,
   rotateAgentEventLifecycleGeneration,
   type AgentEventPayload,
   withAgentRunLifecycleGeneration,
 } from "../infra/agent-events.js";
+import { claimAgentRunContext, registerAgentRunContext } from "../infra/agent-run-registry.js";
 import {
   emitTrustedDiagnosticEvent,
   onTrustedToolExecutionEvent,
