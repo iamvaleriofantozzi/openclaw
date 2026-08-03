@@ -15,10 +15,9 @@ import {
 import { withLocalSessionPlacementTurnAdmission } from "../../agents/session-placement-admission.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import {
-  claimAgentRunContext,
   getAgentEventLifecycleGeneration,
-  getAgentRunContext,
 } from "../../infra/agent-events.js";
+import { claimAgentRunContext, getAgentRunContext } from "../../infra/agent-run-registry.js";
 import {
   getGeneratedMediaTaskIdsForSessionKey,
   hasNewGeneratedMediaTaskForSessionKey,

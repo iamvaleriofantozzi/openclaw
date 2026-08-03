@@ -345,7 +345,7 @@ export function emitAgentAuditEvent(event: Omit<AgentEventPayload, "seq" | "ts">
   const state = getAgentEventState();
   const enriched = enrichAgentEvent(event);
   if (enriched) {
-    const attribution = state.runContextById.get(event.runId)?.attribution;
+    const attribution = getAgentRunContext(event.runId)?.attribution;
     const matchingAttribution =
       attribution?.lifecycleGeneration === enriched.lifecycleGeneration ? attribution : undefined;
     const auditEvent = matchingAttribution
