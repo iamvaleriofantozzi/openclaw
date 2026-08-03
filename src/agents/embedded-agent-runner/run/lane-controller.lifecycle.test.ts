@@ -8,10 +8,10 @@ import { claimAgentRunContext, getAgentRunContext } from "../../../infra/agent-r
 import type { CommandQueueEnqueueOptions } from "../../../process/command-queue.types.js";
 import { createAgentExecutionAttribution } from "../../agent-execution-attribution.js";
 import type { EmbeddedAgentRunResult } from "../types.js";
+import type { RunEmbeddedAgentParamsWithSessionFile } from "./internal-params.js";
 import { createEmbeddedRunLaneController } from "./lane-controller.js";
-import type { RunEmbeddedAgentParams } from "./params.js";
 
-type LaneParams = RunEmbeddedAgentParams & { sessionFile: string };
+type LaneParams = RunEmbeddedAgentParamsWithSessionFile;
 
 const completedResult: EmbeddedAgentRunResult = {
   payloads: [],
