@@ -65,7 +65,11 @@ export function retireSystemAgentGatewayExecution(
 
 export function retainRetiredSystemAgentMutationSettlement(settlement: Promise<void>): void {
   const previous = retiredSystemAgentMutationSettlement;
-  retiredSystemAgentMutationSettlement = Promise.all([previous, settlement]).then(() => undefined);
+  // The fence preserves ordering only. Disposal still reports failures through
+  // its own promise; carrying a rejection here would poison every later Gateway.
+  retiredSystemAgentMutationSettlement = Promise.allSettled([previous, settlement]).then(
+    () => undefined,
+  );
 }
 
 export function assertSystemAgentGatewayExecutionActive(

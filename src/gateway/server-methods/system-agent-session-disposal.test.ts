@@ -85,6 +85,27 @@ describe("disposeSystemAgentSessions", () => {
     await expect(replacement).resolves.toBe("replacement");
   });
 
+  it("reports a failed engine commit without poisoning replacement work", async () => {
+    const sessions = new Map<string, SystemAgentChatSession>([
+      [
+        "mutating",
+        sessionWithDispose(async () => {}, Promise.reject(new Error("engine commit failed"))),
+      ],
+    ]);
+
+    await expect(disposeSystemAgentSessions(sessions, new Map())).rejects.toMatchObject({
+      name: "AggregateError",
+      message: "Failed to dispose system-agent sessions",
+      errors: [expect.objectContaining({ message: "engine commit failed" })],
+    });
+
+    const replacementTask = vi.fn(async () => "replacement");
+    await expect(runSystemAgentGatewayTask(replacementTask, new Map())).resolves.toBe(
+      "replacement",
+    );
+    expect(replacementTask).toHaveBeenCalledOnce();
+  });
+
   it("rejects replacement work within a bounded wait when an engine commit stalls", async () => {
     vi.useFakeTimers();
     const releaseMutation = createDeferred();
