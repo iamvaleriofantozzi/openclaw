@@ -1,5 +1,5 @@
-import type { TrustedToolExecutionEvent } from "../infra/diagnostic-events.js";
 import { getAgentRunContext } from "../infra/agent-run-registry.js";
+import type { TrustedToolExecutionEvent } from "../infra/diagnostic-events.js";
 import { parseAgentSessionKey } from "../routing/session-key.js";
 
 type RunProvenance = {
