@@ -32,8 +32,6 @@ type QaScenarioRuntimeDeps = {
   randomUUID: () => string;
   runScenario: QaScenarioRuntimeFunction;
   waitForOutboundMessage: QaScenarioRuntimeFunction;
-  waitForTransportOutboundMessage: QaScenarioRuntimeFunction;
-  waitForChannelOutboundMessage: QaScenarioRuntimeFunction;
   waitForNoOutbound: QaScenarioRuntimeFunction;
   waitForNoTransportOutbound: QaScenarioRuntimeFunction;
   recentOutboundSummary: QaScenarioRuntimeFunction;
@@ -98,7 +96,6 @@ type QaScenarioRuntimeDeps = {
   liveTurnTimeoutMs: QaScenarioRuntimeFunction;
   resolveQaLiveTurnTimeoutMs: QaScenarioRuntimeFunction;
   splitModelRef: QaScenarioRuntimeFunction;
-  qaChannelPlugin: unknown;
   hasDiscoveryLabels: QaScenarioRuntimeFunction;
   reportsDiscoveryScopeLeak: QaScenarioRuntimeFunction;
   reportsMissingDiscoveryFiles: QaScenarioRuntimeFunction;
@@ -128,8 +125,6 @@ type QaScenarioRuntimeApi<
   runScenario: TDeps["runScenario"];
   waitForCondition: TEnv["transport"]["waitForCondition"];
   waitForOutboundMessage: TDeps["waitForOutboundMessage"];
-  waitForTransportOutboundMessage: TDeps["waitForTransportOutboundMessage"];
-  waitForChannelOutboundMessage: TDeps["waitForChannelOutboundMessage"];
   waitForNoOutbound: TDeps["waitForNoOutbound"];
   waitForNoTransportOutbound: TDeps["waitForNoTransportOutbound"];
   recentOutboundSummary: TDeps["recentOutboundSummary"];
@@ -195,7 +190,6 @@ type QaScenarioRuntimeApi<
   liveTurnTimeoutMs: TDeps["liveTurnTimeoutMs"];
   resolveQaLiveTurnTimeoutMs: TDeps["resolveQaLiveTurnTimeoutMs"];
   splitModelRef: TDeps["splitModelRef"];
-  qaChannelPlugin: unknown;
   hasDiscoveryLabels: TDeps["hasDiscoveryLabels"];
   reportsDiscoveryScopeLeak: TDeps["reportsDiscoveryScopeLeak"];
   reportsMissingDiscoveryFiles: TDeps["reportsMissingDiscoveryFiles"];
@@ -242,8 +236,6 @@ export function createQaScenarioRuntimeApi<
     runScenario: params.deps.runScenario,
     waitForCondition: transport.waitForCondition,
     waitForOutboundMessage: params.deps.waitForOutboundMessage,
-    waitForTransportOutboundMessage: params.deps.waitForTransportOutboundMessage,
-    waitForChannelOutboundMessage: params.deps.waitForChannelOutboundMessage,
     waitForNoOutbound: params.deps.waitForNoOutbound,
     waitForNoTransportOutbound: params.deps.waitForNoTransportOutbound,
     recentOutboundSummary: params.deps.recentOutboundSummary,
@@ -309,7 +301,6 @@ export function createQaScenarioRuntimeApi<
     liveTurnTimeoutMs: params.deps.liveTurnTimeoutMs,
     resolveQaLiveTurnTimeoutMs: params.deps.resolveQaLiveTurnTimeoutMs,
     splitModelRef: params.deps.splitModelRef,
-    qaChannelPlugin: params.deps.qaChannelPlugin,
     hasDiscoveryLabels: params.deps.hasDiscoveryLabels,
     reportsDiscoveryScopeLeak: params.deps.reportsDiscoveryScopeLeak,
     reportsMissingDiscoveryFiles: params.deps.reportsMissingDiscoveryFiles,

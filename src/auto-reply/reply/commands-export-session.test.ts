@@ -1,7 +1,12 @@
-// Tests session export command packaging, filesystem writes, and prompt bundle capture.
+// Tests session and trajectory export command packaging, filesystem writes, and approval routing.
 import { expectDefined } from "@openclaw/normalization-core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { generateExportHtmlVendorAssets } from "../../../scripts/runtime-postbuild.mjs";
+import { FsSafeError } from "../../infra/fs-safe.js";
+import { buildExportSessionReply } from "./commands-export-session.js";
 import type { HandleCommandsParams } from "./commands-types.js";
+
+// Tests session export command packaging, filesystem writes, and prompt bundle capture.
 
 const hoisted = await vi.hoisted(async () => {
   const { createExportCommandSessionMocks } = await import("./commands-export-test-mocks.js");
@@ -35,6 +40,7 @@ const hoisted = await vi.hoisted(async () => {
     sessionTranscriptEvents: [] as unknown[],
   };
 });
+const generatedVendorAssets = generateExportHtmlVendorAssets();
 
 vi.mock("../../acp/runtime/session-meta.js", () => ({
   readAcpSessionMetaForEntry: hoisted.readAcpSessionMetaForEntryMock,
@@ -46,23 +52,23 @@ vi.mock("../../config/sessions/paths.js", () => ({
   resolveSessionFilePathOptions: hoisted.resolveSessionFilePathOptionsMock,
 }));
 
-vi.mock("../../config/sessions/store.js", () => ({
-  loadSessionStore: hoisted.loadSessionStoreMock,
-}));
-
-vi.mock("../../config/sessions/session-accessor.js", () => ({
-  loadSessionEntry: (scope: { storePath?: string; sessionKey: string }) =>
-    (hoisted.loadSessionStoreMock(scope.storePath) as Record<string, unknown>)[scope.sessionKey],
-  loadTranscriptEvents: hoisted.loadTranscriptEventsMock,
-}));
+vi.mock("../../config/sessions/session-accessor.js", () => {
+  const loadSessionEntry = (scope: { storePath?: string; sessionKey: string }) =>
+    (hoisted.loadSessionStoreMock(scope.storePath) as Record<string, unknown>)[scope.sessionKey];
+  return {
+    loadSessionEntry,
+    loadSessionEntryReadOnly: loadSessionEntry,
+    loadTranscriptEvents: hoisted.loadTranscriptEventsMock,
+  };
+});
 
 vi.mock("./commands-system-prompt.js", () => ({
   resolveCommandsSystemPromptBundle: hoisted.resolveCommandsSystemPromptBundleMock,
 }));
 
-vi.mock("./commands-export-session-file.js", () => {
-  return { writeSessionExportFile: hoisted.writeSessionExportFileMock };
-});
+vi.mock("./commands-export-session-file.js", () => ({
+  writeSessionExportFile: hoisted.writeSessionExportFileMock,
+}));
 
 vi.mock("../../agents/sessions/session-manager.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../agents/sessions/session-manager.js")>();
@@ -112,9 +118,6 @@ vi.mock("node:fs/promises", async () => {
     default: mockedFsPromises,
   };
 });
-
-import { FsSafeError } from "../../infra/fs-safe.js";
-import { buildExportSessionReply } from "./commands-export-session.js";
 
 function makeParams(): HandleCommandsParams {
   return {
@@ -210,6 +213,9 @@ describe("buildExportSessionReply", () => {
       async () => hoisted.sessionTranscriptEvents,
     );
     hoisted.exportHtmlTemplateContents.clear();
+    for (const [fileName, contents] of Object.entries(generatedVendorAssets)) {
+      hoisted.exportHtmlTemplateContents.set(`vendor/${fileName}`, contents);
+    }
     hoisted.sessionTranscriptEvents = [];
   });
 
@@ -776,3 +782,6 @@ describe("buildExportSessionReply", () => {
     expect(sessionDataFromHtml(writtenHtml()).warning).toBeUndefined();
   });
 });
+
+await import("./commands-export-session-file.test-support.js");
+await import("./commands-export-trajectory.test-support.js");

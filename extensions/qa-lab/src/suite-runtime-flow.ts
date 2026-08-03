@@ -22,11 +22,11 @@ import {
   reportsDiscoveryScopeLeak,
   reportsMissingDiscoveryFiles,
 } from "./discovery-eval.js";
+import { QaSuiteScenarioSkipError } from "./errors.js";
 import { extractQaToolPayload } from "./extract-tool-payload.js";
 import { assertNoGatewayLogSentinels, scanGatewayLogSentinels } from "./gateway-log-sentinel.js";
 import { resolveQaLiveTurnTimeoutMs } from "./live-timeout.js";
 import { hasModelSwitchContinuitySignal } from "./model-switch-eval.js";
-import { qaChannelPlugin } from "./runtime-api.js";
 import { runRuntimeToolFixture } from "./runtime-tool-fixture.js";
 import type { QaSeedScenarioWithSource } from "./scenario-catalog.js";
 import { runScenarioFlow } from "./scenario-flow-runner.js";
@@ -71,11 +71,9 @@ import {
   formatTransportTranscript,
   readTransportTranscript,
   recentOutboundSummary,
-  waitForChannelOutboundMessage,
   waitForNoOutbound,
   waitForNoTransportOutbound,
   waitForOutboundMessage,
-  waitForTransportOutboundMessage,
 } from "./suite-runtime-transport.js";
 import type { QaSuiteRuntimeEnv } from "./suite-runtime-types.js";
 import {
@@ -132,7 +130,7 @@ type QaSuiteStep = {
 
 type QaSuiteScenarioResult = {
   name: string;
-  status: "pass" | "fail";
+  status: "pass" | "fail" | "skip";
   steps: Array<{
     name: string;
     status: "pass" | "fail" | "skip";
@@ -162,6 +160,10 @@ export async function runQaSuiteScenarioSteps(
       });
     } catch (error) {
       const details = formatQaErrorMessage(error);
+      if (error instanceof QaSuiteScenarioSkipError) {
+        stepResults.push({ name: step.name, status: "skip", details });
+        return { name, status: "skip", steps: stepResults, details };
+      }
       if (process.env.OPENCLAW_QA_DEBUG === "1") {
         console.error(`[qa-suite] fail scenario="${name}" step="${step.name}" details=${details}`);
       }
@@ -197,15 +199,23 @@ type QaSuiteScenarioFlowApiParams = QaSuiteScenarioDepsParams & {
 };
 
 function createQaSuiteScenarioDeps(params: QaSuiteScenarioDepsParams) {
+  const waitForAccountOutboundMessage: typeof waitForOutboundMessage = (
+    state,
+    predicate,
+    timeoutMs,
+    options,
+  ) =>
+    waitForOutboundMessage(state, predicate, timeoutMs, {
+      ...options,
+      accountId: params.env.transport.accountId,
+    });
   return {
     fs,
     path,
     sleep,
     randomUUID,
     runScenario: params.runScenario,
-    waitForOutboundMessage,
-    waitForTransportOutboundMessage,
-    waitForChannelOutboundMessage,
+    waitForOutboundMessage: waitForAccountOutboundMessage,
     waitForNoOutbound,
     waitForNoTransportOutbound,
     recentOutboundSummary,
@@ -286,7 +296,6 @@ function createQaSuiteScenarioDeps(params: QaSuiteScenarioDepsParams) {
     liveTurnTimeoutMs: params.liveTurnTimeoutMs,
     resolveQaLiveTurnTimeoutMs: params.resolveQaLiveTurnTimeoutMs,
     splitModelRef: params.splitModelRef,
-    qaChannelPlugin,
     hasDiscoveryLabels,
     reportsDiscoveryScopeLeak,
     reportsMissingDiscoveryFiles,
@@ -336,7 +345,12 @@ export function createQaSuiteScenarioStepRunner(
             config: execution.config ?? {},
             gateway: env.gateway,
             outputDir: env.outputDir,
+            primaryModel: env.primaryModel,
+            scenarioId: scenario.id,
+            scenarioTitle: scenario.title,
             timeoutMs: execution.timeoutMs ?? deps.liveTurnTimeoutMs(env, 60_000),
+            waitForConfigRestartSettle: async (options) =>
+              await waitForConfigRestartSettle(env, options?.restartDelayMs, options?.timeoutMs),
           });
           if (prepared) {
             Object.assign(vars, prepared);

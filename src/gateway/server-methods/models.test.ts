@@ -3,7 +3,7 @@
 
 import { expectDefined } from "@openclaw/normalization-core";
 import { describe, expect, it, vi } from "vitest";
-import { ErrorCodes } from "../../../packages/gateway-protocol/src/index.js";
+import { resolveDefaultAgentId } from "../../agents/agent-scope.js";
 import {
   clearRuntimeAuthProfileStoreSnapshots,
   replaceRuntimeAuthProfileStoreSnapshots,
@@ -13,7 +13,6 @@ import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { createDeferred } from "../../test-utils/deferred.js";
 import { withEnvAsync } from "../../test-utils/env.js";
 import { withOpenClawTestState } from "../../test-utils/openclaw-test-state.js";
-import { expectGatewayErrorResponse } from "./gateway-response.test-helpers.js";
 import { modelsHandlers } from "./models.js";
 import type { RespondFn } from "./types.js";
 
@@ -49,13 +48,19 @@ function requestModelsList(params: {
   view: "default" | "configured" | "provider-config" | "all";
   respond?: ReturnType<typeof vi.fn>;
   runtimeConfig?: OpenClawConfig;
+  getRuntimeConfig?: () => OpenClawConfig;
   loadGatewayModelCatalog: (params?: {
+    agentId?: string;
+    agentDir?: string;
     readOnly?: boolean;
+    workspaceDir?: string;
   }) => Promise<Array<Record<string, unknown>>>;
   reqId?: string;
   includeProviderCapabilities?: boolean;
 }) {
   const respond = params.respond ?? vi.fn();
+  const runtimeConfig = params.runtimeConfig ?? ({} as OpenClawConfig);
+  const getRuntimeConfig = params.getRuntimeConfig ?? (() => runtimeConfig);
   const request = expectDefined(
     modelsHandlers["models.list"],
     'modelsHandlers["models.list"] test invariant',
@@ -77,13 +82,20 @@ function requestModelsList(params: {
     client: null,
     isWebchatConnect: () => false,
     context: {
-      getRuntimeConfig: () => params.runtimeConfig ?? ({} as OpenClawConfig),
+      getRuntimeConfig,
       loadGatewayModelCatalog: params.loadGatewayModelCatalog,
       loadGatewayModelCatalogSnapshot: async (
         loadParams: Parameters<typeof params.loadGatewayModelCatalog>[0],
       ) => {
         const entries = await params.loadGatewayModelCatalog(loadParams);
-        return { entries, routeVariants: entries };
+        const config = getRuntimeConfig();
+        return {
+          agentId: loadParams?.agentId ?? resolveDefaultAgentId(config),
+          agentDir: "/tmp/models-list-agent",
+          config,
+          entries,
+          routeVariants: entries,
+        };
       },
       logGateway: {
         debug: vi.fn(),
@@ -94,6 +106,68 @@ function requestModelsList(params: {
 }
 
 describe("models.list", () => {
+  it("uses the replacement owner config for the whole catalog projection", async () => {
+    const initialConfig = {
+      agents: { defaults: { models: { "test/old": {} } } },
+    } as OpenClawConfig;
+    const latestConfig = {
+      agents: { defaults: { models: { "test/demo": {} } } },
+    } as OpenClawConfig;
+    let currentConfig = initialConfig;
+    const loadGatewayModelCatalog = vi.fn(async () => {
+      if (currentConfig === initialConfig) {
+        currentConfig = latestConfig;
+      }
+      return [{ id: "demo", name: "Demo", provider: "test" }];
+    });
+
+    const { request, respond } = requestModelsList({
+      view: "configured",
+      getRuntimeConfig: () => currentConfig,
+      loadGatewayModelCatalog,
+    });
+    await request;
+
+    expect(loadGatewayModelCatalog).toHaveBeenCalledOnce();
+    expect(respond).toHaveBeenCalledOnce();
+    expect(respond).toHaveBeenCalledWith(
+      true,
+      { models: [expect.objectContaining({ id: "demo", provider: "test" })] },
+      undefined,
+    );
+  });
+
+  it("escalates to the full owner when replacement config adds a provider wildcard", async () => {
+    const initialConfig = {
+      agents: { defaults: { models: { "test/demo": {} } } },
+    } as OpenClawConfig;
+    const latestConfig = {
+      agents: { defaults: { models: { "test/*": {} } } },
+    } as OpenClawConfig;
+    let currentConfig = initialConfig;
+    let firstLoad = true;
+    const loadGatewayModelCatalog = vi.fn(async (_params?: { readOnly?: boolean }) => {
+      if (firstLoad) {
+        firstLoad = false;
+        currentConfig = latestConfig;
+      }
+      return [{ id: "demo", name: "Demo", provider: "test" }];
+    });
+
+    const { request, respond } = requestModelsList({
+      view: "configured",
+      getRuntimeConfig: () => currentConfig,
+      loadGatewayModelCatalog,
+    });
+    await request;
+
+    expect(loadGatewayModelCatalog.mock.calls.map(([params]) => params?.readOnly)).toEqual([
+      true,
+      false,
+    ]);
+    expect(respond).toHaveBeenCalledWith(true, { models: [] }, undefined);
+  });
+
   it("reports API-key capability from provider auth contracts when requested", async () => {
     const { request, respond } = requestModelsList({
       view: "all",
@@ -183,7 +257,19 @@ describe("models.list", () => {
         },
       },
     } as unknown as OpenClawConfig;
-    const loadGatewayModelCatalog = vi.fn(() => Promise.resolve([]));
+    const loadGatewayModelCatalog = vi.fn(() =>
+      Promise.resolve([
+        {
+          id: "source-model",
+          name: "Source Model",
+          provider: "vllm",
+          status: "disabled",
+          contextWindow: 128_000,
+          reasoning: true,
+          input: ["text", "image"],
+        },
+      ]),
+    );
     setRuntimeConfigSnapshot(runtimeConfig, sourceConfig);
     try {
       const { request, respond } = requestModelsList({
@@ -211,7 +297,10 @@ describe("models.list", () => {
         },
         undefined,
       );
-      expect(loadGatewayModelCatalog).toHaveBeenCalledExactlyOnceWith({ readOnly: true });
+      expect(loadGatewayModelCatalog).toHaveBeenCalledOnce();
+      expect(loadGatewayModelCatalog).toHaveBeenCalledWith(
+        expect.objectContaining({ readOnly: true }),
+      );
     } finally {
       clearRuntimeConfigSnapshot();
     }
@@ -313,17 +402,73 @@ describe("models.list", () => {
                 id: "gpt-test",
                 name: "GPT Test",
                 provider: "openai",
+                agentRuntime: { id: "openclaw", source: "implicit" },
                 available: false,
               },
             ],
           },
           undefined,
         );
-        expect(loadGatewayModelCatalog).toHaveBeenCalledWith({ readOnly: true });
+        expect(loadGatewayModelCatalog).toHaveBeenCalledWith(
+          expect.objectContaining({ readOnly: true }),
+        );
       } finally {
         vi.useRealTimers();
       }
     });
+  });
+
+  it("does not block wildcard provider inventory on slow full discovery", async () => {
+    const catalog = createDeferred<never>();
+    const loadGatewayModelCatalog = vi.fn(() => catalog.promise);
+    const runtimeConfig = {
+      agents: {
+        defaults: {
+          modelPolicy: { allow: ["vllm/*"] },
+        },
+      },
+      models: {
+        providers: {
+          vllm: {
+            baseUrl: "https://vllm.example/v1",
+            models: [{ id: "llama-local", name: "Llama Local" }],
+          },
+        },
+      },
+    } as unknown as OpenClawConfig;
+
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const { request, respond } = requestModelsList({
+        view: "provider-config",
+        runtimeConfig,
+        loadGatewayModelCatalog,
+        reqId: "req-models-list-wildcard-provider-timeout",
+      });
+
+      await vi.advanceTimersByTimeAsync(800);
+      await vi.runOnlyPendingTimersAsync();
+      await request;
+
+      expect(respond).toHaveBeenCalledWith(
+        true,
+        {
+          models: [
+            {
+              id: "llama-local",
+              name: "Llama Local",
+              provider: "vllm",
+            },
+          ],
+        },
+        undefined,
+      );
+      expect(loadGatewayModelCatalog).toHaveBeenCalledWith(
+        expect.objectContaining({ readOnly: false }),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("keeps SecretRef configured fallback rows unknown when catalog discovery times out", async () => {
@@ -409,11 +554,21 @@ describe("models.list", () => {
         expect(respond).toHaveBeenCalledWith(
           true,
           {
-            models: [{ id: "gpt-test", name: "GPT Test", provider: "openai", available: false }],
+            models: [
+              {
+                id: "gpt-test",
+                name: "GPT Test",
+                provider: "openai",
+                agentRuntime: { id: "codex", source: "implicit" },
+                available: false,
+              },
+            ],
           },
           undefined,
         );
-        expect(loadGatewayModelCatalog).toHaveBeenCalledWith({ readOnly: false });
+        expect(loadGatewayModelCatalog).toHaveBeenCalledWith(
+          expect.objectContaining({ readOnly: false }),
+        );
       } finally {
         vi.useRealTimers();
       }
@@ -489,15 +644,29 @@ describe("models.list", () => {
         true,
         {
           models: [
-            { id: "gpt-5.4", name: "GPT-5.4 Codex", provider: "openai", available: true },
-            { id: "gpt-codex-test", name: "GPT Codex Test", provider: "openai", available: true },
+            {
+              id: "gpt-5.4",
+              name: "GPT-5.4 Codex",
+              provider: "openai",
+              agentRuntime: { id: "codex", source: "implicit" },
+              available: true,
+            },
+            {
+              id: "gpt-codex-test",
+              name: "GPT Codex Test",
+              provider: "openai",
+              agentRuntime: { id: "codex", source: "implicit" },
+              available: true,
+            },
             { id: "llama-local", name: "Llama Local", provider: "vllm", available: true },
             { id: "qwen-local", name: "Qwen Local", provider: "vllm", available: true },
           ],
         },
         undefined,
       );
-      expect(loadConfiguredCatalog).toHaveBeenCalledWith({ readOnly: false });
+      expect(loadConfiguredCatalog).toHaveBeenCalledWith(
+        expect.objectContaining({ readOnly: false }),
+      );
 
       const { request: allRequest, respond: allRespond } = requestModelsList({
         view: "all",
@@ -517,8 +686,20 @@ describe("models.list", () => {
               provider: "anthropic",
               available: false,
             },
-            { id: "gpt-5.4", name: "GPT-5.4 Codex", provider: "openai", available: true },
-            { id: "gpt-codex-test", name: "GPT Codex Test", provider: "openai", available: true },
+            {
+              id: "gpt-5.4",
+              name: "GPT-5.4 Codex",
+              provider: "openai",
+              agentRuntime: { id: "codex", source: "implicit" },
+              available: true,
+            },
+            {
+              id: "gpt-codex-test",
+              name: "GPT Codex Test",
+              provider: "openai",
+              agentRuntime: { id: "codex", source: "implicit" },
+              available: true,
+            },
             { id: "llama-local", name: "Llama Local", provider: "vllm", available: true },
             { id: "qwen-local", name: "Qwen Local", provider: "vllm", available: true },
           ],
@@ -645,6 +826,7 @@ describe("models.list", () => {
                   id: "gpt-5.4",
                   name: "GPT-5.4 Codex",
                   provider: "openai",
+                  agentRuntime: { id: "codex", source: "implicit" },
                   available: true,
                 },
               ],
@@ -713,6 +895,7 @@ describe("models.list", () => {
                   id: "claude-opus-4-8",
                   name: "Claude Opus 4.8",
                   provider: "anthropic",
+                  agentRuntime: { id: "claude-cli", source: "model" },
                   available: true,
                 },
               ],
@@ -1333,18 +1516,14 @@ describe("models.list", () => {
     );
   });
 
-  it("preserves catalog load errors before the timeout fallback wins", async () => {
+  it("propagates catalog load errors to the dispatch backstop", async () => {
     const { request, respond } = requestModelsList({
       view: "configured",
       loadGatewayModelCatalog: vi.fn(() => Promise.reject(new Error("catalog failed"))),
       reqId: "req-models-list-catalog-error",
     });
-    await request;
-
-    expectGatewayErrorResponse(respond, {
-      code: ErrorCodes.UNAVAILABLE,
-      message: "Error: catalog failed",
-    });
+    await expect(request).rejects.toThrow("catalog failed");
+    expect(respond).not.toHaveBeenCalled();
   });
 });
 /* oxlint-disable max-lines -- TODO: split this grandfathered oversized file. */

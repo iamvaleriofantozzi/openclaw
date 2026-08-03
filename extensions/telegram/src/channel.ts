@@ -83,7 +83,7 @@ import {
   resolveTelegramSessionConversation,
   resolveTelegramSessionTarget,
 } from "./session-conversation.js";
-import { telegramSetupAdapter } from "./setup-core.js";
+import { telegramSetupContract } from "./setup-core.js";
 import { telegramSetupWizard } from "./setup-surface.js";
 import {
   createTelegramPluginBase,
@@ -114,6 +114,11 @@ function resolveTelegramProbe() {
   return (
     getOptionalTelegramRuntime()?.channel?.telegram?.probeTelegram ?? probeModule.probeTelegram
   );
+}
+
+function isTelegramRichMessagesEnabled(cfg: OpenClawConfig, accountId?: string | null): boolean {
+  const selectedAccountId = accountId ?? resolveDefaultTelegramAccountId(cfg);
+  return mergeTelegramAccountConfig(cfg, selectedAccountId).richMessages === true;
 }
 
 async function readStartupBotInfoCache(params: {
@@ -179,14 +184,17 @@ function resolveTelegramMonitor() {
   );
 }
 
-function formatTelegramUnauthorizedTokenError(account: ResolvedTelegramAccount): string {
+function formatTelegramUnauthorizedTokenError(
+  account: ResolvedTelegramAccount,
+  status: 401 | 404,
+): string {
   const source =
     account.tokenSource === "none" ? "no configured token" : `${account.tokenSource} token`;
   const credentialPath =
     account.accountId === DEFAULT_ACCOUNT_ID
       ? "channels.telegram.botToken, channels.telegram.tokenFile, or TELEGRAM_BOT_TOKEN"
       : `channels.telegram.accounts.${account.accountId}.botToken/tokenFile`;
-  return `Telegram bot token unauthorized for account "${account.accountId}" (getMe returned 401 from Telegram; source: ${source}). Update ${credentialPath} with the current BotFather token.`;
+  return `Telegram bot token unauthorized for account "${account.accountId}" (getMe returned ${status} from Telegram; source: ${source}). Update ${credentialPath} with the current BotFather token.`;
 }
 
 function getOptionalTelegramRuntime() {
@@ -267,6 +275,7 @@ const telegramMessageAdapter = createChannelMessageAdapterFromOutbound<OpenClawC
 });
 
 const telegramMessageActions: ChannelMessageActionAdapter = {
+  messageActionTargetAliases: telegramMessageActionsImpl.messageActionTargetAliases,
   resolveExecutionMode: (ctx) =>
     getOptionalTelegramRuntime()?.channel?.telegram?.messageActions?.resolveExecutionMode?.(ctx) ??
     telegramMessageActionsImpl.resolveExecutionMode?.(ctx) ??
@@ -692,7 +701,6 @@ async function resolveTelegramTargets(params: {
           proxyUrl: account.config.proxy,
           apiRoot: account.config.apiRoot,
           network: account.config.network,
-          timeoutSeconds: account.config.timeoutSeconds,
         });
         if (!id) {
           return {
@@ -731,7 +739,7 @@ export const telegramPlugin = createChatChannelPlugin({
   base: {
     ...createTelegramPluginBase({
       setupWizard: telegramSetupWizard,
-      setup: telegramSetupAdapter,
+      setupContract: telegramSetupContract,
     }),
     allowlist: buildDmGroupAccountAllowlistAdapter({
       channelId: "telegram",
@@ -815,12 +823,35 @@ export const telegramPlugin = createChatChannelPlugin({
           cfg,
           accountId: accountId ?? undefined,
         });
-        const capabilities = inlineButtonsScope === "off" ? [] : ["inlineButtons"];
-        const selectedAccountId = accountId ?? resolveDefaultTelegramAccountId(cfg);
-        if (mergeTelegramAccountConfig(cfg, selectedAccountId).richMessages === true) {
-          capabilities.push("richText");
+        return [
+          ...(inlineButtonsScope === "off" ? [] : ["inlineButtons"]),
+          ...(isTelegramRichMessagesEnabled(cfg, accountId) ? ["markdownDetails"] : []),
+        ];
+      },
+      // Authoring contract lives here so every runtime (including native Codex)
+      // sees it via inbound-meta response_format; core system-prompt no longer owns it.
+      inboundFormattingHints: ({ cfg, accountId }) => {
+        const richMessages = isTelegramRichMessagesEnabled(cfg, accountId);
+        if (richMessages) {
+          return {
+            text_markup: "markdown_telegram_rich",
+            rules: [
+              "Telegram rich ON (Bot API 10.2 blocks; OpenClaw maps markdown + these HTML islands to typed blocks).",
+              'Supported: headings, tables (markdown, or `<table>` HTML for caption/colspan/rowspan/align), block/pull quotes (`<aside>` + `<cite>`), `<details><summary>` (+`open`), dividers `<hr/>`, sup/sub/mark/spoilers, `<ul>`/`<ol>` + `<input type="checkbox" checked/>` tasks, code, anchors `<a name="x"></a>` + `<a href="#x">label</a>`, custom emoji `<tg-emoji emoji-id="...">`, maps `<tg-map lat="" long="" zoom=""/>`, collages/slideshows `<tg-collage>`/`<tg-slideshow>`, block media e.g. `<img src="https://..."/>` (+`<figure>`/`<figcaption>`).',
+              "Math: `<tg-math>` inline, `<tg-math-block>` block; never `$...$`/`\\(...\\)`.",
+              "Not MarkdownV2/parse_mode.",
+              "Collapse=`<details>` (not expandable blockquote); structured bullets=`<ul><li>` (not literal bullets).",
+              "Media https URLs only, block-level only, captions/credits when useful; buttons plain text; normal files via attachments.",
+            ],
+          };
         }
-        return capabilities;
+        return {
+          text_markup: "markdown",
+          rules: [
+            "Telegram rich OFF. Standard Telegram formatting only; no rich tables/details/block media/formulas.",
+            "Owner can enable `richMessages` for this Telegram account.",
+          ],
+        };
       },
       reactionGuidance: ({ cfg, accountId }) => {
         const level = resolveTelegramReactionLevel({
@@ -1027,6 +1058,10 @@ export const telegramPlugin = createChatChannelPlugin({
     gateway: {
       startAccount: async (ctx) => {
         const account = ctx.account;
+        const setStatus = createAccountStatusSink({
+          accountId: account.accountId,
+          setStatus: ctx.setStatus,
+        });
         const ownerAccountId = findTelegramTokenOwnerAccountId({
           cfg: ctx.cfg,
           accountId: account.accountId,
@@ -1045,17 +1080,14 @@ export const telegramPlugin = createChatChannelPlugin({
         let botInfo: TelegramBotInfo | undefined;
         try {
           const probe = await withTelegramStartupProbeSlot(ctx.abortSignal, () =>
-            resolveTelegramProbe()(
-              token,
-              resolveTelegramStartupProbeTimeoutMs(account.config.timeoutSeconds),
-              {
-                accountId: account.accountId,
-                proxyUrl: account.config.proxy,
-                network: account.config.network,
-                apiRoot: account.config.apiRoot,
-                includeWebhookInfo: false,
-              },
-            ),
+            resolveTelegramProbe()(token, resolveTelegramStartupProbeTimeoutMs(undefined), {
+              accountId: account.accountId,
+              proxyUrl: account.config.proxy,
+              network: account.config.network,
+              apiRoot: account.config.apiRoot,
+              includeWebhookInfo: false,
+              abortSignal: ctx.abortSignal,
+            }),
           );
           const username = probe.ok ? probe.bot?.username?.trim() : null;
           if (username) {
@@ -1070,9 +1102,9 @@ export const telegramPlugin = createChatChannelPlugin({
               log: ctx.log,
             });
           }
-          if (!probe.ok && probe.status === 401) {
+          if (!probe.ok && (probe.status === 401 || probe.status === 404)) {
             await deleteStartupBotInfoCache(account.accountId);
-            unauthorizedTokenReason = formatTelegramUnauthorizedTokenError(account);
+            unauthorizedTokenReason = formatTelegramUnauthorizedTokenError(account, probe.status);
           } else if (!probe.ok) {
             botInfo = await readStartupBotInfoCache({
               accountId: account.accountId,
@@ -1101,13 +1133,14 @@ export const telegramPlugin = createChatChannelPlugin({
         }
         if (unauthorizedTokenReason) {
           ctx.log?.error?.(`[${account.accountId}] ${unauthorizedTokenReason}`);
+          setStatus({
+            lifecycle: "blocked",
+            terminalDisconnect: true,
+            lastError: unauthorizedTokenReason,
+          });
           throw new Error(unauthorizedTokenReason);
         }
         ctx.log?.info(`[${account.accountId}] starting provider${telegramBotLabel}`);
-        const setStatus = createAccountStatusSink({
-          accountId: account.accountId,
-          setStatus: ctx.setStatus,
-        });
         return resolveTelegramMonitor()({
           token,
           accountId: account.accountId,

@@ -1,6 +1,7 @@
 /** Computes at/every/cron schedule timestamps with bounded Croner caching. */
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import { Cron } from "croner";
+import { pruneMapToMaxSize } from "../infra/map-size.js";
 import { parseAbsoluteTimeMs } from "./parse.js";
 import { coerceFiniteScheduleNumber } from "./schedule-number.js";
 import type { CronSchedule } from "./types.js";
@@ -27,14 +28,8 @@ function resolveCachedCron(expr: string, timezone: string): Cron {
     cronEvalCache.set(key, cached);
     return cached;
   }
-  if (cronEvalCache.size >= CRON_EVAL_CACHE_MAX) {
-    // Expression parsing is expensive enough to cache, but cron jobs can be
-    // edited dynamically; keep the cache bounded and LRU-like.
-    const oldest = cronEvalCache.keys().next().value;
-    if (oldest) {
-      cronEvalCache.delete(oldest);
-    }
-  }
+  // Expression parsing is expensive, so retain the most recently promoted entries.
+  pruneMapToMaxSize(cronEvalCache, CRON_EVAL_CACHE_MAX - 1);
   const next = new Cron(expr, { timezone, catch: false });
   cronEvalCache.set(key, next);
   return next;
@@ -77,9 +72,9 @@ export function computeNextRunAtMs(schedule: CronSchedule, nowMs: number): numbe
     return anchor + steps * everyMs;
   }
 
-  if (schedule.kind === "on-exit") {
+  if (schedule.kind === "on-exit" || schedule.kind === "stream") {
     // Event-driven trigger: never time-due. The gateway watcher calls
-    // enqueueRun when the watched command exits.
+    // enqueueRun when the watched command exits or a stream batch closes.
     return undefined;
   }
 
@@ -131,21 +126,30 @@ export function computePreviousRunAtMs(schedule: CronSchedule, nowMs: number): n
 }
 
 /** Clears the Croner expression cache for deterministic tests. */
-export function clearCronScheduleCacheForTest(): void {
+function clearCronScheduleCacheForTest(): void {
   cronEvalCache.clear();
 }
 
 /** Returns the Croner expression cache size for tests. */
-export function getCronScheduleCacheSizeForTest(): number {
+function getCronScheduleCacheSizeForTest(): number {
   return cronEvalCache.size;
 }
 
 /** Returns the Croner expression cache capacity for tests. */
-export function getCronScheduleCacheMaxForTest(): number {
+function getCronScheduleCacheMaxForTest(): number {
   return CRON_EVAL_CACHE_MAX;
 }
 
 /** Returns whether an expression/timezone pair is present in the Croner cache for tests. */
-export function hasCronInCacheForTest(expr: string, tz: string): boolean {
+function hasCronInCacheForTest(expr: string, tz: string): boolean {
   return cronEvalCache.has(`${tz}\u0000${expr}`);
+}
+
+if (process.env.VITEST || process.env.NODE_ENV === "test") {
+  (globalThis as Record<PropertyKey, unknown>)[Symbol.for("openclaw.cronScheduleTestApi")] = {
+    clearCronScheduleCacheForTest,
+    getCronScheduleCacheSizeForTest,
+    getCronScheduleCacheMaxForTest,
+    hasCronInCacheForTest,
+  };
 }

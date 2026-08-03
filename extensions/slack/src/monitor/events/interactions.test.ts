@@ -32,6 +32,13 @@ const resolveApprovalOverGatewayMock = vi.hoisted(() =>
     approval: { status: "allowed", decision: "allow-once" },
   })),
 );
+const resolveQuestionOverGatewayMock = vi.hoisted(() =>
+  vi.fn(async (_arg: unknown) => ({
+    status: "answered" as const,
+    questionId: "target",
+    optionValue: "Production",
+  })),
+);
 
 let registerSlackInteractionEvents: typeof import("./interactions.js").registerSlackInteractionEvents;
 
@@ -53,6 +60,12 @@ vi.mock("openclaw/plugin-sdk/heartbeat-runtime", async (importOriginal) => {
 
 vi.mock("openclaw/plugin-sdk/approval-gateway-runtime", () => ({
   resolveApprovalOverGateway: (arg: unknown) => resolveApprovalOverGatewayMock(arg),
+}));
+
+vi.mock("openclaw/plugin-sdk/question-gateway-runtime", () => ({
+  questionGatewayRuntime: {
+    resolveOption: (arg: unknown) => resolveQuestionOverGatewayMock(arg),
+  },
 }));
 
 vi.mock("../../interactive-dispatch.js", () => ({
@@ -168,25 +181,6 @@ type RegisteredViewHandler = (args: {
       hash?: string;
       state?: { values?: Record<string, Record<string, Record<string, unknown>>> };
     };
-  };
-}) => Promise<void>;
-
-type RegisteredViewClosedHandler = (args: {
-  ack: () => Promise<void>;
-  body: {
-    user?: { id?: string };
-    team?: { id?: string };
-    trigger_id?: string;
-    view?: {
-      id?: string;
-      callback_id?: string;
-      private_metadata?: string;
-      root_view_id?: string;
-      previous_view_id?: string;
-      external_id?: string;
-      hash?: string;
-      state?: { values?: Record<string, Record<string, Record<string, unknown>>> };
-    };
     is_cleared?: boolean;
   };
 }) => Promise<void>;
@@ -218,19 +212,25 @@ function createContext(overrides?: {
   let handler: RegisteredHandler | null = null;
   let actionMatcher: RegExp | null = null;
   let viewHandler: RegisteredViewHandler | null = null;
-  let viewClosedHandler: RegisteredViewClosedHandler | null = null;
+  let viewClosedHandler: RegisteredViewHandler | null = null;
   let shortcutHandler: RegisteredShortcutHandler | null = null;
   const app = {
     action: vi.fn((matcher: RegExp, next: RegisteredHandler) => {
       actionMatcher = matcher;
       handler = next;
     }),
-    view: vi.fn((_matcher: RegExp, next: RegisteredViewHandler) => {
-      viewHandler = next;
-    }),
-    viewClosed: vi.fn((_matcher: RegExp, next: RegisteredViewClosedHandler) => {
-      viewClosedHandler = next;
-    }),
+    view: vi.fn(
+      (
+        matcher: { callback_id: RegExp; type: "view_submission" | "view_closed" },
+        next: RegisteredViewHandler,
+      ) => {
+        if (matcher.type === "view_submission") {
+          viewHandler = next;
+        } else {
+          viewClosedHandler = next;
+        }
+      },
+    ),
     shortcut: vi.fn((_matcher: RegExp, next: RegisteredShortcutHandler) => {
       shortcutHandler = next;
     }),
@@ -425,11 +425,36 @@ describe("registerSlackInteractionEvents", () => {
       applied: true,
       approval: { status: "allowed", decision: "allow-once" },
     });
+    resolveQuestionOverGatewayMock.mockClear();
+    resolveQuestionOverGatewayMock.mockResolvedValue({
+      status: "answered",
+      questionId: "target",
+      optionValue: "Production",
+    });
     dispatchPluginInteractiveHandlerMock.mockResolvedValue({
       matched: false,
       handled: false,
       duplicate: false,
     });
+  });
+
+  it("registers modal submission and close handlers through Bolt's supported view API", () => {
+    const { ctx, app, getViewHandler, getViewClosedHandler } = createContext();
+
+    registerSlackInteractionEvents({ ctx: ctx as never });
+
+    expect(app.view).toHaveBeenCalledTimes(2);
+    expect(app.view).toHaveBeenNthCalledWith(
+      1,
+      { callback_id: expect.any(RegExp), type: "view_submission" },
+      expect.any(Function),
+    );
+    expect(app.view).toHaveBeenNthCalledWith(
+      2,
+      { callback_id: expect.any(RegExp), type: "view_closed" },
+      expect.any(Function),
+    );
+    expect(getViewHandler()).not.toBe(getViewClosedHandler());
   });
 
   it("routes global shortcuts to the actor's direct session", async () => {
@@ -1283,6 +1308,46 @@ describe("registerSlackInteractionEvents", () => {
       ],
     });
     expect(respond).not.toHaveBeenCalled();
+  });
+
+  it("resolves typed question buttons without enqueueing an agent interaction", async () => {
+    const questionId = "ask_0123456789abcdef0123456789abcdef";
+    const { ctx, getHandler } = createContext();
+    registerSlackInteractionEvents({ ctx: ctx as never });
+
+    const ack = vi.fn().mockResolvedValue(undefined);
+    const respond = vi.fn().mockResolvedValue(undefined);
+    await getHandler()({
+      ack,
+      respond,
+      body: {
+        user: { id: "U123" },
+        channel: { id: "C1" },
+        container: { channel_id: "C1", message_ts: "100.200" },
+        message: { ts: "100.200", text: "Question", blocks: [] },
+      },
+      action: {
+        type: "button",
+        action_id: "openclaw:question_button:1:2",
+        block_id: "openclaw_reply_buttons_1",
+        value: `slq1:${questionId}:1`,
+        text: { type: "plain_text", text: "Production" },
+      },
+    });
+
+    expect(ack).toHaveBeenCalledOnce();
+    expect(resolveQuestionOverGatewayMock).toHaveBeenCalledWith({
+      cfg: ctx.cfg,
+      questionId,
+      optionIndex: 1,
+      senderId: "U123",
+      clientDisplayName: "Slack question (default)",
+    });
+    expect(respond).toHaveBeenCalledWith({
+      text: "Answer submitted.",
+      response_type: "ephemeral",
+    });
+    expect(enqueueSystemEventMock).not.toHaveBeenCalled();
   });
 
   it("cleans stale typed buttons and shows the canonical first-answer winner", async () => {
@@ -2995,6 +3060,21 @@ describe("registerSlackInteractionEvents", () => {
       senderId: "U777",
     });
     expect(enqueueSystemEventMock).toHaveBeenCalledTimes(1);
+    expect(mockCallArg(enqueueSystemEventMock, 0, "enqueueSystemEvent", 1)).toMatchObject({
+      sessionKey: "agent:ops:slack:channel:C1",
+      deliveryContext: {
+        channel: "slack",
+        to: "user:U777",
+        accountId: "default",
+      },
+    });
+    expect(requestHeartbeatMock).toHaveBeenCalledWith({
+      source: "hook",
+      intent: "immediate",
+      reason: "hook:slack-interaction",
+      sessionKey: "agent:ops:slack:channel:C1",
+      heartbeat: { target: "last" },
+    });
     const eventText = enqueueSystemEventText();
     const payload = JSON.parse(eventText.replace("Slack interaction: ", "")) as {
       interactionType: string;
@@ -3029,6 +3109,71 @@ describe("registerSlackInteractionEvents", () => {
     expect(notesInput?.inputValue).toBe("ship now");
     expect(trackEvent).toHaveBeenCalledTimes(1);
   });
+
+  it.each(["view_submission", "view_closed"] as const)(
+    "routes accepted %s events back to their authorized Slack channel",
+    async (interactionType) => {
+      const { ctx, getViewHandler, getViewClosedHandler } = createContext();
+      registerSlackInteractionEvents({ ctx: ctx as never });
+      const handleView =
+        interactionType === "view_submission" ? getViewHandler() : getViewClosedHandler();
+
+      await handleView({
+        ack: vi.fn().mockResolvedValue(undefined),
+        body: {
+          user: { id: "U777" },
+          view: {
+            id: "V777",
+            callback_id: "openclaw:deploy_form",
+            private_metadata: JSON.stringify({
+              channelId: "C777",
+              channelType: "channel",
+              userId: "U777",
+            }),
+          },
+        },
+      });
+
+      expect(mockCallArg(enqueueSystemEventMock, 0, "enqueueSystemEvent", 1)).toMatchObject({
+        deliveryContext: {
+          channel: "slack",
+          to: "channel:C777",
+          accountId: "default",
+        },
+      });
+      expect(requestHeartbeatMock).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each(["view_submission", "view_closed"] as const)(
+    "does not wake the agent when a duplicate %s event is rejected",
+    async (interactionType) => {
+      enqueueSystemEventMock.mockReturnValue(false);
+      const { ctx, getViewHandler, getViewClosedHandler } = createContext();
+      registerSlackInteractionEvents({ ctx: ctx as never });
+      const handleView =
+        interactionType === "view_submission" ? getViewHandler() : getViewClosedHandler();
+
+      await handleView({
+        ack: vi.fn().mockResolvedValue(undefined),
+        body: {
+          user: { id: "U777" },
+          view: {
+            id: "V777",
+            callback_id: "openclaw:deploy_form",
+            private_metadata: JSON.stringify({
+              channelId: "D777",
+              channelType: "im",
+              userId: "U777",
+            }),
+          },
+        },
+      });
+
+      expect(enqueueSystemEventMock).toHaveBeenCalledOnce();
+      expect(requestHeartbeatMock).not.toHaveBeenCalled();
+    },
+  );
 
   it("dispatches plugin-owned modal submissions with full view state before compacting events", async () => {
     enqueueSystemEventMock.mockClear();
@@ -3300,6 +3445,7 @@ describe("registerSlackInteractionEvents", () => {
 
     expect(ack).toHaveBeenCalled();
     expect(enqueueSystemEventMock).not.toHaveBeenCalled();
+    expect(requestHeartbeatMock).not.toHaveBeenCalled();
   });
 
   it("blocks modal events when private metadata is missing userId", async () => {
@@ -3325,6 +3471,7 @@ describe("registerSlackInteractionEvents", () => {
 
     expect(ack).toHaveBeenCalled();
     expect(enqueueSystemEventMock).not.toHaveBeenCalled();
+    expect(requestHeartbeatMock).not.toHaveBeenCalled();
   });
 
   it("keeps no-channel modal events open when allowFrom is unset", async () => {
@@ -3351,6 +3498,18 @@ describe("registerSlackInteractionEvents", () => {
 
     expect(ack).toHaveBeenCalled();
     expect(enqueueSystemEventMock).toHaveBeenCalledTimes(1);
+    expect(mockCallArg(enqueueSystemEventMock, 0, "enqueueSystemEvent", 1)).toMatchObject({
+      deliveryContext: { channel: "slack", accountId: "default" },
+    });
+    const deliveryContext = requireRecord(
+      requireRecord(
+        mockCallArg(enqueueSystemEventMock, 0, "enqueueSystemEvent", 1),
+        "event options",
+      ).deliveryContext,
+      "delivery context",
+    );
+    expect(deliveryContext).not.toHaveProperty("to");
+    expect(requestHeartbeatMock).toHaveBeenCalledOnce();
   });
 
   it("captures modal input labels and picker values across block types", async () => {
@@ -3689,6 +3848,16 @@ describe("registerSlackInteractionEvents", () => {
     ).toEqual(["canary"]);
     expect(trackEvent).toHaveBeenCalledTimes(1);
     expect(options.sessionKey).toBe("agent:main:slack:channel:C99");
+    expect(options).toMatchObject({
+      deliveryContext: { channel: "slack", accountId: "default" },
+    });
+    expect(requestHeartbeatMock).toHaveBeenCalledWith({
+      source: "hook",
+      intent: "immediate",
+      reason: "hook:slack-interaction",
+      sessionKey: "agent:main:slack:channel:C99",
+      heartbeat: { target: "last" },
+    });
   });
 
   it("defaults modal close isCleared to false when Slack omits the flag", async () => {

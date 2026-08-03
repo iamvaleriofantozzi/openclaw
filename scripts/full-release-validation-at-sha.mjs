@@ -7,6 +7,12 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const WORKFLOW = "full-release-validation.yml";
+const TRUSTED_WORKFLOW_PATH = `.github/workflows/${WORKFLOW}`;
+const RELEASE_EVIDENCE_VERIFIER_PATHS = [
+  "scripts/release-ci-summary.mjs",
+  ".agents/skills/release-openclaw-ci/scripts/release-ci-summary.mjs",
+];
+const GH_READ_TIMEOUT_MS = 60_000;
 const RELEASE_BRANCH_PATTERN =
   /^(?:release\/[0-9]{4}\.[0-9]+\.[0-9]+|extended-stable\/[0-9]{4}\.[0-9]+\.33)$/u;
 const RELEASE_TAG_PATTERN = /^v[0-9]{4}\.[0-9]+\.[0-9]+(?:-(?:alpha|beta)\.[0-9]+)?$/u;
@@ -15,29 +21,8 @@ const DEFAULT_INPUTS = {
   mode: "both",
   rerun_group: "all",
   reuse_evidence: "true",
+  fail_fast: "false",
 };
-const WORKFLOW_RUN_CHECK_SUITE_QUERY = `
-query($owner: String!, $repo: String!, $oid: GitObjectID!, $after: String) {
-  repository(owner: $owner, name: $repo) {
-    object(oid: $oid) {
-      ... on Commit {
-        checkSuites(first: 100, after: $after) {
-          nodes {
-            status
-            conclusion
-            workflowRun {
-              url
-            }
-          }
-          pageInfo {
-            hasNextPage
-            endCursor
-          }
-        }
-      }
-    }
-  }
-}`;
 
 function usage() {
   console.error(`Usage: node scripts/full-release-validation-at-sha.mjs [--sha <target-sha>] [--target-ref <canonical-release-branch-or-tag>] [--workflow-sha <trusted-main-ref>] [--keep-branch] [--dry-run] [-- -f key=value ...]
@@ -48,8 +33,10 @@ watches the parent run, verifies all child workflow head SHAs match the trusted
 workflow lineage through the release evidence manifest, then deletes the
 temporary branch by default. Exact-target and changelog-only Release SHA
 evidence reuse stay enabled; pass -f reuse_evidence=false to force a fresh
-run. The release profile defaults to beta for alpha/beta package versions and
-stable otherwise; pass -f release_profile=full for the broad advisory sweep.`);
+run. Child workflows collect independent failures by default; pass
+-f fail_fast=true to cancel each child after its first failed job. The release
+profile defaults to beta for alpha/beta package versions and stable otherwise;
+pass -f release_profile=full for the broad advisory sweep.`);
 }
 
 function run(command, args, options = {}) {
@@ -73,6 +60,17 @@ function runStatus(command, args, options = {}) {
     encoding: "utf8",
     stdio: options.stdio ?? ["ignore", "pipe", "inherit"],
   });
+}
+
+export function runGhRead(args, params = {}) {
+  const execFileSyncImpl = params.execFileSyncImpl ?? execFileSync;
+  const output = execFileSyncImpl("gh", args, {
+    encoding: "utf8",
+    killSignal: "SIGKILL",
+    stdio: ["ignore", "pipe", "inherit"],
+    timeout: params.timeoutMs ?? GH_READ_TIMEOUT_MS,
+  });
+  return typeof output === "string" ? output.trim() : "";
 }
 
 function readOptionValue(argv, index, optionName) {
@@ -165,6 +163,9 @@ export function parseArgs(argv) {
 
   if (!["true", "false"].includes(args.inputs.reuse_evidence)) {
     throw new Error("reuse_evidence must be true or false");
+  }
+  if (!["true", "false"].includes(args.inputs.fail_fast)) {
+    throw new Error("fail_fast must be true or false");
   }
   if (
     Object.hasOwn(args.inputs, "allow_unreleased_changelog") &&
@@ -263,7 +264,7 @@ function collectRunId(dispatchOutput) {
 }
 
 function findLatestRunId(branch, sha) {
-  const json = run("gh", [
+  const json = runGhRead([
     "run",
     "list",
     "--workflow",
@@ -282,50 +283,19 @@ function findLatestRunId(branch, sha) {
   return match?.databaseId ? String(match.databaseId) : "";
 }
 
-export function selectWorkflowRunCheckSuite(nodes, parentRunId) {
+function readWorkflowRun(parentRunId, workflowSha) {
   if (!/^[1-9][0-9]*$/u.test(String(parentRunId))) {
     throw new Error("parent run ID must be a positive decimal");
   }
-  const expectedUrl = `https://github.com/openclaw/openclaw/actions/runs/${parentRunId}`;
-  return nodes.find((node) => node?.workflowRun?.url === expectedUrl);
-}
-
-function readWorkflowRunCheckSuite(parentRunId, workflowSha) {
-  let after;
-  for (let page = 0; page < 20; page += 1) {
-    const queryArgs = [
-      "api",
-      "graphql",
-      "-F",
-      "owner=openclaw",
-      "-F",
-      "repo=openclaw",
-      "-F",
-      `oid=${workflowSha}`,
-      "-f",
-      `query=${WORKFLOW_RUN_CHECK_SUITE_QUERY}`,
-    ];
-    if (after) {
-      queryArgs.push("-F", `after=${after}`);
-    }
-    const response = JSON.parse(run("gh", queryArgs));
-    const checkSuites = response?.data?.repository?.object?.checkSuites;
-    if (!checkSuites || !Array.isArray(checkSuites.nodes)) {
-      throw new Error("GraphQL response did not include commit check suites");
-    }
-    const match = selectWorkflowRunCheckSuite(checkSuites.nodes, parentRunId);
-    if (match) {
-      return match;
-    }
-    if (!checkSuites.pageInfo?.hasNextPage) {
-      return undefined;
-    }
-    after = checkSuites.pageInfo.endCursor;
-    if (!after) {
-      throw new Error("GraphQL check-suite pagination omitted its end cursor");
-    }
+  const workflowRun = JSON.parse(
+    runGhRead(["api", `repos/openclaw/openclaw/actions/runs/${parentRunId}`]),
+  );
+  if (workflowRun.head_sha !== workflowSha) {
+    throw new Error(
+      `Full Release Validation run ${parentRunId} head ${String(workflowRun.head_sha)} does not match trusted workflow SHA ${workflowSha}`,
+    );
   }
-  throw new Error("Full Release Validation check suite was not found within 20 pages");
+  return workflowRun;
 }
 
 function waitForWorkflowRun(parentRunId, workflowSha) {
@@ -334,7 +304,7 @@ function waitForWorkflowRun(parentRunId, workflowSha) {
   for (let attempt = 0; attempt < 480; attempt += 1) {
     let suite;
     try {
-      suite = readWorkflowRunCheckSuite(parentRunId, workflowSha);
+      suite = readWorkflowRun(parentRunId, workflowSha);
       consecutiveErrors = 0;
     } catch (error) {
       consecutiveErrors += 1;
@@ -345,16 +315,14 @@ function waitForWorkflowRun(parentRunId, workflowSha) {
       console.warn(`Parent run status query failed; retrying: ${message}`);
     }
 
-    const summary = suite
-      ? `${String(suite.status).toLowerCase()}/${String(suite.conclusion ?? "pending").toLowerCase()}`
-      : "awaiting-check-suite";
+    const summary = `${String(suite?.status ?? "pending").toLowerCase()}/${String(suite?.conclusion ?? "pending").toLowerCase()}`;
     if (summary !== lastSummary) {
       console.log(`Parent run status: ${summary}`);
       lastSummary = summary;
     }
-    if (suite?.status === "COMPLETED") {
-      if (suite.conclusion === "SUCCESS") {
-        return;
+    if (suite?.status === "completed") {
+      if (suite.conclusion === "success") {
+        return suite;
       }
       throw new Error(
         `Full Release Validation concluded ${String(suite.conclusion).toLowerCase()}: https://github.com/openclaw/openclaw/actions/runs/${parentRunId}`,
@@ -374,18 +342,40 @@ export function releaseEvidenceVerificationArgs(parentRunId) {
   return ["--validate-run", String(parentRunId), "--trusted-workflow-ref", "main", "--json"];
 }
 
+export function shouldDeleteTemporaryWorkflowRef(params) {
+  return (
+    !params.keepBranch &&
+    (params.dryRun || (params.parentConclusion === "success" && params.evidenceVerified))
+  );
+}
+
+export function assertTrustedWorkflowHarness(
+  workflowSha,
+  pathExists = (relativePath) =>
+    runStatus("git", ["cat-file", "-e", `${workflowSha}:${relativePath}`], {
+      stdio: ["ignore", "ignore", "ignore"],
+    }).status === 0,
+) {
+  if (!pathExists(TRUSTED_WORKFLOW_PATH)) {
+    throw new Error(
+      `trusted workflow SHA ${workflowSha} does not contain ${TRUSTED_WORKFLOW_PATH}`,
+    );
+  }
+  const verifierPath = RELEASE_EVIDENCE_VERIFIER_PATHS.find((relativePath) =>
+    pathExists(relativePath),
+  );
+  if (!verifierPath) {
+    throw new Error(
+      `trusted workflow SHA ${workflowSha} does not contain a supported release evidence verifier`,
+    );
+  }
+  return verifierPath;
+}
+
 export function releaseEvidenceVerifierPath(worktreeRoot) {
-  const candidates = [
-    join(worktreeRoot, "scripts", "release-ci-summary.mjs"),
-    join(
-      worktreeRoot,
-      ".agents",
-      "skills",
-      "release-openclaw-ci",
-      "scripts",
-      "release-ci-summary.mjs",
-    ),
-  ];
+  const candidates = RELEASE_EVIDENCE_VERIFIER_PATHS.map((relativePath) =>
+    join(worktreeRoot, relativePath),
+  );
   const verifier = candidates.find((candidate) => existsSync(candidate));
   if (!verifier) {
     throw new Error("trusted workflow checkout does not contain a release evidence verifier");
@@ -424,6 +414,7 @@ function main() {
   args.inputs.allow_unreleased_changelog ??= args.targetRef ? "false" : "true";
   const targetContextRef = verifyTargetRef(args.targetRef, targetSha);
   const workflowSha = resolveTrustedWorkflowSha(args.workflowSha);
+  assertTrustedWorkflowHarness(workflowSha);
   const shortSha = workflowSha.slice(0, 12);
   const branch = `release-ci/${shortSha}-${Date.now()}`;
   const remoteBranchRef = `refs/heads/${branch}`;
@@ -443,6 +434,8 @@ function main() {
   });
 
   let parentRunId;
+  let parentConclusion = "";
+  let evidenceVerified = false;
   try {
     const dispatchArgs = ["workflow", "run", WORKFLOW, "--ref", branch];
     for (const [key, value] of Object.entries(dispatchInputs)) {
@@ -471,16 +464,38 @@ function main() {
     }
 
     console.log(`Parent run: https://github.com/openclaw/openclaw/actions/runs/${parentRunId}`);
-    waitForWorkflowRun(parentRunId, workflowSha);
+    const completedRun = waitForWorkflowRun(parentRunId, workflowSha);
+    parentConclusion = String(completedRun.conclusion ?? "");
+    if (parentConclusion !== "success") {
+      throw new Error(
+        `Full Release Validation concluded ${parentConclusion.toLowerCase() || "without a conclusion"}: https://github.com/openclaw/openclaw/actions/runs/${parentRunId}`,
+      );
+    }
     verifyReleaseEvidence(parentRunId, workflowSha);
+    evidenceVerified = true;
   } finally {
-    if (!args.keepBranch) {
+    if (
+      shouldDeleteTemporaryWorkflowRef({
+        keepBranch: args.keepBranch,
+        dryRun: args.dryRun,
+        parentConclusion,
+        evidenceVerified,
+      })
+    ) {
       run("git", ["push", "origin", `:${remoteBranchRef}`], {
         dryRun: args.dryRun,
         stdio: "inherit",
       });
     } else {
-      console.log(`Kept ${remoteBranchRef}`);
+      console.warn(
+        args.keepBranch
+          ? `Kept ${remoteBranchRef}`
+          : `Kept ${remoteBranchRef}: ${
+              parentConclusion === "success"
+                ? "release evidence was not verified"
+                : `parent concluded ${parentConclusion || "without a conclusion"}`
+            }. Keep it through GitHub reruns or evidence diagnosis; delete it after verified success.`,
+      );
     }
   }
 }

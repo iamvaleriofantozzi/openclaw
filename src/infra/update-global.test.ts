@@ -27,6 +27,7 @@ import {
   createGlobalInstallEnv,
   globalInstallArgs,
   globalInstallFallbackArgs,
+  resolveExpectedInstalledVersionFromSpec,
   resolveGlobalInstallTarget,
   resolveGlobalInstallSpec,
   resolveNpmGlobalPrefixLayoutFromGlobalRoot,
@@ -128,6 +129,41 @@ describe("update global helpers", () => {
         tag: "https://example.com/openclaw-main.tgz",
       }),
     ).toBe("https://example.com/openclaw-main.tgz");
+  });
+
+  it.each([
+    { packageName: "openclaw", spec: "openclaw@1.2.3", expected: "1.2.3" },
+    { packageName: "openclaw", spec: "openclaw@v1.2.3", expected: "1.2.3" },
+    { packageName: "openclaw", spec: "openclaw@=1.2.3", expected: "1.2.3" },
+    { packageName: "openclaw", spec: "openclaw@=v1.2.3", expected: "1.2.3" },
+    {
+      packageName: "@openclaw/core",
+      spec: "@openclaw/core@2026.7.30-beta.1",
+      expected: "2026.7.30-beta.1",
+    },
+    { packageName: "openclaw", spec: "openclaw@^1.2.3", expected: null },
+    { packageName: "openclaw", spec: "openclaw@~1.2.3", expected: null },
+    { packageName: "openclaw", spec: "openclaw@>=1.2.3", expected: null },
+    { packageName: "openclaw", spec: "openclaw@1.2.x", expected: null },
+    { packageName: "openclaw", spec: "openclaw@1.2", expected: null },
+    { packageName: "openclaw", spec: "openclaw@*", expected: null },
+    { packageName: "openclaw", spec: "openclaw@latest", expected: null },
+    { packageName: "openclaw", spec: "openclaw@beta", expected: null },
+    { packageName: "openclaw", spec: "openclaw@next", expected: null },
+    { packageName: "openclaw", spec: "openclaw@main", expected: null },
+    { packageName: "openclaw", spec: "openclaw@nightly", expected: null },
+    { packageName: "openclaw", spec: "openclaw@V1.2.3", expected: null },
+    { packageName: "openclaw", spec: "openclaw@npm:@vendor/openclaw@1.2.3", expected: null },
+    { packageName: "openclaw", spec: "openclaw@file:../candidate", expected: null },
+    { packageName: "openclaw", spec: "openclaw@../candidate", expected: null },
+    { packageName: "openclaw", spec: "openclaw@https://example.test/openclaw.tgz", expected: null },
+    { packageName: "openclaw", spec: "openclaw@github:openclaw/openclaw#main", expected: null },
+    { packageName: "openclaw", spec: "other@1.2.3", expected: null },
+    { packageName: "openclaw", spec: "1.2.3", expected: null },
+  ])("derives an expected installed version only for an exact npm spec: $spec", (testCase) => {
+    expect(resolveExpectedInstalledVersionFromSpec(testCase.packageName, testCase.spec)).toBe(
+      testCase.expected,
+    );
   });
 
   it("identifies package targets that support registry version resolution", () => {
@@ -636,48 +672,6 @@ describe("update global helpers", () => {
     });
   });
 
-  it("does not infer pnpm ownership without pnpm node_modules metadata", async () => {
-    await withTempDir({ prefix: "openclaw-update-pnpm-shape-only-" }, async (base) => {
-      const customGlobalDir = path.join(base, "custom-pnpm");
-      const customGlobalRoot = path.join(customGlobalDir, "5", "node_modules");
-      const pkgRoot = path.join(customGlobalRoot, "openclaw");
-      const defaultPnpmRoot = path.join(base, "default-pnpm", "5", "node_modules");
-      await fs.mkdir(pkgRoot, { recursive: true });
-      await fs.writeFile(
-        path.join(customGlobalDir, "5", "pnpm-lock.yaml"),
-        "lockfileVersion: '9.0'\n",
-        "utf8",
-      );
-
-      const runCommand: CommandRunner = async (argv) => {
-        if (argv[0] === "npm") {
-          return { stdout: "", stderr: "", code: 1 };
-        }
-        if (argv[0] === "pnpm") {
-          return { stdout: `${defaultPnpmRoot}\n`, stderr: "", code: 0 };
-        }
-        throw new Error(`unexpected command: ${argv.join(" ")}`);
-      };
-
-      await expect(
-        detectGlobalInstallManagerForRoot(runCommand, pkgRoot, 1000),
-      ).resolves.toBeNull();
-      await expect(
-        resolveGlobalInstallTarget({
-          manager: "pnpm",
-          runCommand,
-          timeoutMs: 1000,
-          pkgRoot,
-        }),
-      ).resolves.toEqual({
-        manager: "pnpm",
-        command: "pnpm",
-        globalRoot: defaultPnpmRoot,
-        packageRoot: path.join(defaultPnpmRoot, "openclaw"),
-      });
-    });
-  });
-
   it("builds npm staged install argv with an explicit prefix", () => {
     expect(globalInstallArgs("npm", "openclaw@latest", null, "/tmp/stage")).toEqual([
       "npm",
@@ -767,6 +761,27 @@ describe("update global helpers", () => {
       "-g",
       "--trust",
       "openclaw@latest",
+    ]);
+    expect(globalInstallArgs("bun", "/tmp/openclaw-current.tgz")).toEqual([
+      "bun",
+      "add",
+      "-g",
+      "--trust",
+      "openclaw@file:/tmp/openclaw-current.tgz",
+    ]);
+    expect(globalInstallArgs("bun", "https://example.test/openclaw.tgz")).toEqual([
+      "bun",
+      "add",
+      "-g",
+      "--trust",
+      "openclaw@https://example.test/openclaw.tgz",
+    ]);
+    expect(globalInstallArgs("bun", "github:openclaw/openclaw#main")).toEqual([
+      "bun",
+      "add",
+      "-g",
+      "--trust",
+      "openclaw@github:openclaw/openclaw#main",
     ]);
     expect(globalInstallFallbackArgs("npm", "openclaw@latest")).toEqual([
       "npm",

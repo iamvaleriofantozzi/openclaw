@@ -1,7 +1,7 @@
 // Line tests cover monitor.lifecycle plugin behavior.
 import crypto from "node:crypto";
 import { EventEmitter } from "node:events";
-import type { IncomingMessage, ServerResponse } from "node:http";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import type { RuntimeEnv } from "openclaw/plugin-sdk/runtime-env";
 import { createMockIncomingRequest } from "openclaw/plugin-sdk/test-env";
@@ -15,16 +15,19 @@ const {
   createLineBotMock,
   createLineNodeWebhookHandlerMock,
   registerWebhookTargetWithPluginRouteMock,
+  runDetachedWebhookWorkMock,
   unregisterHttpMock,
 } = vi.hoisted(() => ({
   createLineBotMock: vi.fn(() => ({
     account: { accountId: "default" },
     handleWebhook: vi.fn<LineHandleWebhook>(),
+    stop: vi.fn(),
   })),
   createLineNodeWebhookHandlerMock: vi.fn<() => LineNodeWebhookHandler>(() =>
     vi.fn<LineNodeWebhookHandler>(async () => {}),
   ),
   registerWebhookTargetWithPluginRouteMock: vi.fn(),
+  runDetachedWebhookWorkMock: vi.fn(),
   unregisterHttpMock: vi.fn(),
 }));
 
@@ -100,6 +103,17 @@ vi.mock("openclaw/plugin-sdk/webhook-ingress", async () => {
   };
 });
 
+vi.mock("openclaw/plugin-sdk/webhook-request-guards", async () => {
+  const actual = await vi.importActual<typeof import("openclaw/plugin-sdk/webhook-request-guards")>(
+    "openclaw/plugin-sdk/webhook-request-guards",
+  );
+  runDetachedWebhookWorkMock.mockImplementation(actual.runDetachedWebhookWork);
+  return {
+    ...actual,
+    runDetachedWebhookWork: runDetachedWebhookWorkMock,
+  };
+});
+
 vi.mock("./webhook-node.js", async () => {
   const actual = await vi.importActual<typeof import("./webhook-node.js")>("./webhook-node.js");
   return {
@@ -116,20 +130,13 @@ vi.mock("./markdown-to-line.js", () => ({
   processLineMessage: vi.fn(),
 }));
 
-vi.mock("./reply-chunks.js", () => ({
-  sendLineReplyChunks: vi.fn(),
-}));
-
 vi.mock("./send.js", () => ({
   createFlexMessage: vi.fn(),
   createImageMessage: vi.fn(),
   createLocationMessage: vi.fn(),
   createQuickReplyItems: vi.fn(),
-  createTextMessageWithQuickReplies: vi.fn(),
   getUserDisplayName: vi.fn(),
-  pushMessageLine: vi.fn(),
   pushMessagesLine: vi.fn(),
-  pushTextMessageWithQuickReplies: vi.fn(),
   replyMessageLine: vi.fn(),
   showLoadingAnimation: vi.fn(),
 }));
@@ -148,10 +155,10 @@ describe("monitorLineProvider lifecycle", () => {
     vi.doUnmock("openclaw/plugin-sdk/reply-runtime");
     vi.doUnmock("openclaw/plugin-sdk/runtime-env");
     vi.doUnmock("openclaw/plugin-sdk/webhook-ingress");
+    vi.doUnmock("openclaw/plugin-sdk/webhook-request-guards");
     vi.doUnmock("./webhook-node.js");
     vi.doUnmock("./auto-reply-delivery.js");
     vi.doUnmock("./markdown-to-line.js");
-    vi.doUnmock("./reply-chunks.js");
     vi.doUnmock("./send.js");
     vi.doUnmock("./template-messages.js");
     vi.resetModules();
@@ -162,7 +169,11 @@ describe("monitorLineProvider lifecycle", () => {
     createLineBotMock.mockImplementation(() => ({
       account: { accountId: "default" },
       handleWebhook: vi.fn<LineHandleWebhook>(),
+      stop: vi.fn(async () => undefined),
     }));
+    // Clear call history only; the implementation was wired to the actual
+    // helper once in the module mock factory.
+    runDetachedWebhookWorkMock.mockClear();
     innerLineWebhookHandlerMock = vi.fn<LineNodeWebhookHandler>(async () => {});
     createLineNodeWebhookHandlerMock
       .mockReset()
@@ -210,6 +221,7 @@ describe("monitorLineProvider lifecycle", () => {
 
   it("waits for abort before resolving", async () => {
     const abort = new AbortController();
+    const statusSink = vi.fn();
     let resolved = false;
 
     const task = monitorLineProvider({
@@ -218,6 +230,7 @@ describe("monitorLineProvider lifecycle", () => {
       config: {} as OpenClawConfig,
       runtime: {} as RuntimeEnv,
       abortSignal: abort.signal,
+      statusSink,
     }).then((monitor) => {
       resolved = true;
       return monitor;
@@ -225,11 +238,17 @@ describe("monitorLineProvider lifecycle", () => {
 
     expect(registerWebhookTargetWithPluginRouteMock).toHaveBeenCalledTimes(1);
     expect(requireWebhookRegistration().route.auth).toBe("plugin");
+    expect(statusSink).toHaveBeenCalledWith(
+      expect.objectContaining({ lifecycle: "ready", connected: true }),
+    );
     expect(resolved).toBe(false);
 
     abort.abort();
     await task;
     expect(unregisterHttpMock).toHaveBeenCalledTimes(1);
+    expect(statusSink).toHaveBeenLastCalledWith(
+      expect.objectContaining({ lifecycle: "stopped", running: false }),
+    );
   });
 
   it("registers an account target without replacing existing route ownership", async () => {
@@ -249,7 +268,7 @@ describe("monitorLineProvider lifecycle", () => {
     expect(registration.route.pluginId).toBe("line");
     expect(registration.route).not.toHaveProperty("path");
     expect(registration.route).not.toHaveProperty("replaceExisting");
-    monitor.stop();
+    await monitor.stop();
   });
 
   it("stops immediately when signal is already aborted", async () => {
@@ -276,8 +295,8 @@ describe("monitorLineProvider lifecycle", () => {
     });
 
     expect(unregisterHttpMock).not.toHaveBeenCalled();
-    monitor.stop();
-    monitor.stop();
+    await monitor.stop();
+    await monitor.stop();
     expect(unregisterHttpMock).toHaveBeenCalledTimes(1);
   });
 
@@ -305,7 +324,7 @@ describe("monitorLineProvider lifecycle", () => {
     expect(registration.target.accountId).toBe("work");
     expect(registration.route.accountId).toBe("work");
 
-    monitor.stop();
+    await monitor.stop();
   });
 
   it("does not register a webhook when bot startup fails", async () => {
@@ -363,8 +382,156 @@ describe("monitorLineProvider lifecycle", () => {
     expect(firstBot.handleWebhook).not.toHaveBeenCalled();
     expect(secondBot.handleWebhook).toHaveBeenCalledTimes(1);
 
-    firstMonitor.stop();
-    secondMonitor.stop();
+    await firstMonitor.stop();
+    await secondMonitor.stop();
+  });
+
+  it("marks only durably admitted signed HTTP webhooks and redacts failures", async () => {
+    const runtimeError = vi.fn<(...args: unknown[]) => void>();
+    const runtime: RuntimeEnv = {
+      log: vi.fn<(...args: unknown[]) => void>(),
+      error: runtimeError,
+      exit: vi.fn<(code: number) => void>(),
+    };
+    const monitor = await monitorLineProvider({
+      channelAccessToken: "token",
+      channelSecret: "secret", // pragma: allowlist secret
+      accountId: "default",
+      config: {} as OpenClawConfig,
+      runtime,
+    });
+    const route = requireRegisteredRoute();
+    const server = createServer((req, res) => {
+      void route.handler(req, res);
+    });
+
+    try {
+      await new Promise<void>((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(0, "127.0.0.1", () => {
+          server.removeListener("error", reject);
+          resolve();
+        });
+      });
+      const address = server.address();
+      if (!address || typeof address === "string") {
+        throw new Error("expected LINE webhook test server to have a TCP address");
+      }
+
+      const webhookUrl = `http://127.0.0.1:${address.port}/line/webhook`;
+      const payload = JSON.stringify({ events: [{ type: "message" }] });
+      const rejected = await fetch(webhookUrl, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-line-signature": "invalid-signature",
+        },
+        body: payload,
+      });
+      expect(rejected.status).toBe(401);
+      expect(rejected.headers.get("x-openclaw-delivery-accepted")).toBeNull();
+      expect(await rejected.json()).toEqual({ error: "Invalid signature" });
+
+      const bot = createLineBotMock.mock.results[0]?.value;
+      if (!bot) {
+        throw new Error("expected registered LINE webhook bot");
+      }
+      expect(bot.handleWebhook).not.toHaveBeenCalled();
+
+      const verificationPayload = JSON.stringify({ events: [] });
+      const verificationSignature = crypto
+        .createHmac("SHA256", "secret")
+        .update(verificationPayload)
+        .digest("base64");
+      const verification = await fetch(webhookUrl, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-line-signature": verificationSignature,
+        },
+        body: verificationPayload,
+      });
+      expect(verification.status).toBe(200);
+      expect(verification.headers.get("x-openclaw-delivery-accepted")).toBeNull();
+      expect(await verification.json()).toEqual({ status: "ok" });
+      expect(bot.handleWebhook).not.toHaveBeenCalled();
+
+      let releaseAdmission: (() => void) | undefined;
+      bot.handleWebhook.mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            releaseAdmission = resolve;
+          }),
+      );
+      const signature = crypto.createHmac("SHA256", "secret").update(payload).digest("base64");
+      let acceptedResponseReceived = false;
+      const acceptedRequest = fetch(webhookUrl, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-line-signature": signature,
+        },
+        body: payload,
+      }).then((response) => {
+        acceptedResponseReceived = true;
+        return response;
+      });
+      await vi.waitFor(() => {
+        expect(bot.handleWebhook).toHaveBeenCalledTimes(1);
+      });
+      expect(acceptedResponseReceived).toBe(false);
+      if (!releaseAdmission) {
+        throw new Error("expected pending LINE durable admission");
+      }
+      releaseAdmission();
+      const accepted = await acceptedRequest;
+      expect(accepted.status).toBe(200);
+      expect(accepted.headers.get("x-openclaw-delivery-accepted")).toBe("durable");
+      expect(await accepted.json()).toEqual({ status: "ok" });
+
+      const bearerToken = "test_line_access_token_1234567890";
+      bot.handleWebhook.mockRejectedValueOnce({
+        code: "LINE_ADMISSION_REJECTED",
+        retryAfterMs: 250,
+        authorization: `Bearer ${bearerToken}`,
+      });
+      const response = await fetch(webhookUrl, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-line-signature": signature,
+        },
+        body: payload,
+      });
+
+      expect(response.status).toBe(500);
+      expect(response.headers.get("x-openclaw-delivery-accepted")).toBeNull();
+      expect(await response.json()).toEqual({ error: "Internal server error" });
+      expect(bot.handleWebhook).toHaveBeenCalledTimes(2);
+      expect(runtimeError).toHaveBeenCalledTimes(1);
+      const message = String(runtimeError.mock.calls[0]?.[0]);
+      expect(message).toContain("line webhook error:");
+      expect(message).toContain("LINE_ADMISSION_REJECTED");
+      expect(message).toContain("retryAfterMs");
+      expect(message).not.toContain("[object Object]");
+      expect(message).not.toContain(bearerToken);
+    } finally {
+      try {
+        if (server.listening) {
+          await new Promise<void>((resolve, reject) => {
+            server.close((error) => {
+              if (error) {
+                reject(error);
+                return;
+              }
+              resolve();
+            });
+          });
+        }
+      } finally {
+        await monitor.stop();
+      }
+    }
   });
 
   it("dispatches a signed POST to a configured trailing-slash webhook path", async () => {
@@ -397,10 +564,40 @@ describe("monitorLineProvider lifecycle", () => {
     expect(res.statusCode).toBe(200);
     expect(bot.handleWebhook).toHaveBeenCalledTimes(1);
 
-    monitor.stop();
+    await monitor.stop();
   });
 
-  it("acknowledges shared-path POST requests before matched event processing completes", async () => {
+  it("durably admits matched events before acknowledging", async () => {
+    const monitor = await monitorLineProvider({
+      channelAccessToken: "token",
+      channelSecret: "secret", // pragma: allowlist secret
+      accountId: "default",
+      config: {} as OpenClawConfig,
+      runtime: {} as RuntimeEnv,
+    });
+
+    const route = requireRegisteredRoute();
+    const payload = JSON.stringify({ events: [{ type: "message" }] });
+    const signature = crypto.createHmac("SHA256", "secret").update(payload).digest("base64");
+    const req = Object.assign(createMockIncomingRequest([payload]), {
+      method: "POST",
+      headers: { "x-line-signature": signature },
+    }) as unknown as IncomingMessage;
+    const res = createRouteResponse();
+
+    await route.handler(req, res);
+
+    const bot = createLineBotMock.mock.results[0]?.value as {
+      handleWebhook: ReturnType<typeof vi.fn>;
+    };
+    expect(res.statusCode).toBe(200);
+    expect(runDetachedWebhookWorkMock).not.toHaveBeenCalled();
+    expect(bot.handleWebhook).toHaveBeenCalledTimes(1);
+
+    await monitor.stop();
+  });
+
+  it("waits for shared-path durable admission before acknowledging", async () => {
     const monitor = await monitorLineProvider({
       channelAccessToken: "token",
       channelSecret: "secret", // pragma: allowlist secret
@@ -429,16 +626,20 @@ describe("monitorLineProvider lifecycle", () => {
     }) as unknown as IncomingMessage;
     const res = createRouteResponse();
 
-    await route.handler(req, res);
-
-    expect(res.statusCode).toBe(200);
-    expect(res.headersSent).toBe(true);
+    const request = route.handler(req, res);
+    await vi.waitFor(() => {
+      expect(bot.handleWebhook).toHaveBeenCalledTimes(1);
+    });
+    expect(res.headersSent).toBe(false);
     expect(bot.handleWebhook).toHaveBeenCalledTimes(1);
     if (!releaseWebhook) {
       throw new Error("expected pending LINE webhook handler");
     }
     releaseWebhook();
-    monitor.stop();
+    await request;
+    expect(res.statusCode).toBe(200);
+    expect(res.headersSent).toBe(true);
+    await monitor.stop();
   });
 
   it("rejects ambiguous shared-path webhook signatures", async () => {
@@ -480,8 +681,8 @@ describe("monitorLineProvider lifecycle", () => {
     expect(firstBot.handleWebhook).not.toHaveBeenCalled();
     expect(secondBot.handleWebhook).not.toHaveBeenCalled();
 
-    firstMonitor.stop();
-    secondMonitor.stop();
+    await firstMonitor.stop();
+    await secondMonitor.stop();
   });
 
   it("rejects webhook requests above the shared in-flight limit before body handling", async () => {
@@ -539,6 +740,6 @@ describe("monitorLineProvider lifecycle", () => {
 
     heldRequests.splice(0).forEach((req) => req.destroy());
     await Promise.allSettled(firstRequests);
-    monitor.stop();
+    await monitor.stop();
   });
 });
