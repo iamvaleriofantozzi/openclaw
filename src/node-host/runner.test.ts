@@ -256,13 +256,13 @@ describe("runNodeHost", () => {
 
     options?.onEvent?.({
       type: "event",
-      event: "node.invoke.input",
-      payload: { id: "invoke-1", nodeId: "node-1", seq: 3, payloadJSON: '{"kind":"data"}' },
-    });
-    options?.onEvent?.({
-      type: "event",
-      event: "node.invoke.cancel",
-      payload: { invokeId: "invoke-1", nodeId: "node-1" },
+      event: "node.invoke.request",
+      payload: {
+        id: "invoke-1",
+        nodeId: "node-1",
+        command: "system.run",
+        sessionKey: "agent:main:main",
+      },
     });
     await vi.waitFor(() =>
       expect(mocks.activeRuntime.invoke).toHaveBeenCalledWith({
@@ -275,6 +275,16 @@ describe("runNodeHost", () => {
         sessionKey: "agent:main:main",
       }),
     );
+    options?.onEvent?.({
+      type: "event",
+      event: "node.invoke.input",
+      payload: { id: "invoke-1", nodeId: "node-1", seq: 3, payloadJSON: '{"kind":"data"}' },
+    });
+    options?.onEvent?.({
+      type: "event",
+      event: "node.invoke.cancel",
+      payload: { invokeId: "invoke-1", nodeId: "node-1" },
+    });
     await vi.waitFor(() => {
       expect(mocks.activeRuntime.handleInput).toHaveBeenCalledWith(
         "invoke-1",
@@ -579,18 +589,8 @@ describe("runNodeHost", () => {
         payloadJSON: '{"kind":"data"}',
       },
     });
-    options?.onEvent?.({
-      type: "event",
-      event: "node.invoke.cancel",
-      payload: {
-        invokeId: "invoke-negotiating",
-        nodeId: "node-1",
-      },
-    });
-
     expect(mocks.activeRuntime.invoke).not.toHaveBeenCalled();
     expect(mocks.activeRuntime.handleInput).not.toHaveBeenCalled();
-    expect(mocks.activeRuntime.cancel).not.toHaveBeenCalled();
     resolveNegotiation?.();
     await vi.waitFor(() => {
       expect(mocks.activeRuntime.invoke).toHaveBeenCalledWith(
@@ -604,14 +604,168 @@ describe("runNodeHost", () => {
         1,
         '{"kind":"data"}',
       );
-      expect(mocks.activeRuntime.cancel).toHaveBeenCalledWith("invoke-negotiating");
     });
     expect(mocks.activeRuntime.invoke.mock.invocationCallOrder[0]).toBeLessThan(
       mocks.activeRuntime.handleInput.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
     );
-    expect(mocks.activeRuntime.handleInput.mock.invocationCallOrder[0]).toBeLessThan(
-      mocks.activeRuntime.cancel.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
+  });
+
+  it("charges session envelope negotiation against the invoke deadline", async () => {
+    mocks.useFakeRuntime = true;
+    const dateNowSpy = vi.spyOn(Date, "now");
+    let nowMs = 1_000;
+    dateNowSpy.mockImplementation(() => nowMs);
+    try {
+      await expect(runNodeHost({ gatewayHost: "127.0.0.1", gatewayPort: 18789 })).rejects.toThrow(
+        "event loop readiness timeout",
+      );
+      const options = lastCapturedOptions();
+      const client = mocks.capturedGatewayClients[0];
+      let resolveNegotiation: (() => void) | undefined;
+      client?.request.mockImplementation((method: string) => {
+        if (method === "node.protocolFeatures.update") {
+          return new Promise((resolve) => {
+            resolveNegotiation = () => resolve({});
+          });
+        }
+        return Promise.resolve({});
+      });
+
+      options?.onHelloOk?.({
+        protocol: 1,
+        features: { methods: [], events: [] },
+      } as unknown as Parameters<NonNullable<GatewayClientOptions["onHelloOk"]>>[0]);
+      options?.onEvent?.({
+        type: "event",
+        event: "node.invoke.request",
+        payload: {
+          id: "invoke-with-deadline",
+          nodeId: "node-1",
+          command: "system.run",
+          timeoutMs: 100,
+        },
+      });
+
+      nowMs += 40;
+      resolveNegotiation?.();
+      await vi.waitFor(() => {
+        expect(mocks.activeRuntime.invoke).toHaveBeenCalledWith(
+          expect.objectContaining({
+            id: "invoke-with-deadline",
+            timeoutMs: 60,
+          }),
+        );
+      });
+    } finally {
+      dateNowSpy.mockRestore();
+    }
+  });
+
+  it("does not dispatch invokes that expire during session envelope negotiation", async () => {
+    mocks.useFakeRuntime = true;
+    const dateNowSpy = vi.spyOn(Date, "now");
+    let nowMs = 1_000;
+    dateNowSpy.mockImplementation(() => nowMs);
+    try {
+      await expect(runNodeHost({ gatewayHost: "127.0.0.1", gatewayPort: 18789 })).rejects.toThrow(
+        "event loop readiness timeout",
+      );
+      const options = lastCapturedOptions();
+      const client = mocks.capturedGatewayClients[0];
+      let resolveNegotiation: (() => void) | undefined;
+      client?.request.mockImplementation((method: string) => {
+        if (method === "node.protocolFeatures.update") {
+          return new Promise((resolve) => {
+            resolveNegotiation = () => resolve({});
+          });
+        }
+        return Promise.resolve({});
+      });
+
+      options?.onHelloOk?.({
+        protocol: 1,
+        features: { methods: [], events: [] },
+      } as unknown as Parameters<NonNullable<GatewayClientOptions["onHelloOk"]>>[0]);
+      options?.onEvent?.({
+        type: "event",
+        event: "node.invoke.request",
+        payload: {
+          id: "invoke-expired",
+          nodeId: "node-1",
+          command: "system.run",
+          timeoutMs: 10,
+        },
+      });
+      options?.onEvent?.({
+        type: "event",
+        event: "node.invoke.input",
+        payload: {
+          id: "invoke-expired",
+          nodeId: "node-1",
+          seq: 0,
+          payloadJSON: '{"kind":"barrier"}',
+        },
+      });
+
+      nowMs += 10;
+      resolveNegotiation?.();
+      await vi.waitFor(() => {
+        expect(mocks.activeRuntime.handleInput).toHaveBeenCalledWith(
+          "invoke-expired",
+          0,
+          '{"kind":"barrier"}',
+        );
+      });
+      expect(mocks.activeRuntime.invoke).not.toHaveBeenCalled();
+    } finally {
+      dateNowSpy.mockRestore();
+    }
+  });
+
+  it("does not dispatch invokes cancelled during session envelope negotiation", async () => {
+    mocks.useFakeRuntime = true;
+    await expect(runNodeHost({ gatewayHost: "127.0.0.1", gatewayPort: 18789 })).rejects.toThrow(
+      "event loop readiness timeout",
     );
+    const options = lastCapturedOptions();
+    const client = mocks.capturedGatewayClients[0];
+    let resolveNegotiation: (() => void) | undefined;
+    client?.request.mockImplementation((method: string) => {
+      if (method === "node.protocolFeatures.update") {
+        return new Promise((resolve) => {
+          resolveNegotiation = () => resolve({});
+        });
+      }
+      return Promise.resolve({});
+    });
+
+    options?.onHelloOk?.({
+      protocol: 1,
+      features: { methods: [], events: [] },
+    } as unknown as Parameters<NonNullable<GatewayClientOptions["onHelloOk"]>>[0]);
+    options?.onEvent?.({
+      type: "event",
+      event: "node.invoke.request",
+      payload: {
+        id: "invoke-cancelled",
+        nodeId: "node-1",
+        command: "system.run",
+      },
+    });
+    options?.onEvent?.({
+      type: "event",
+      event: "node.invoke.cancel",
+      payload: {
+        invokeId: "invoke-cancelled",
+        nodeId: "node-1",
+      },
+    });
+
+    resolveNegotiation?.();
+    await vi.waitFor(() => {
+      expect(mocks.activeRuntime.cancel).toHaveBeenCalledWith("invoke-cancelled");
+    });
+    expect(mocks.activeRuntime.invoke).not.toHaveBeenCalled();
   });
 
   it("preserves absent envelopes only after an old gateway is confirmed", async () => {
